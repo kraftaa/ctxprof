@@ -387,17 +387,29 @@ def render_table(include_stale: bool = False) -> str:
 
 
 def dashboard(refresh_seconds: float, include_stale: bool) -> int:
-    if refresh_seconds <= 0:
+    # Print once if a one-shot was requested, OR if stdout is not an interactive
+    # terminal (piped, captured, or run via a non-tty runner) — looping there
+    # can't clear the screen and would just spam frame after frame.
+    if refresh_seconds <= 0 or not sys.stdout.isatty():
         print(render_table(include_stale=include_stale))
         return 0
 
+    # Live mode in a real terminal: use the alternate screen buffer so each frame
+    # redraws in place and the user's scrollback is left untouched on exit.
+    sys.stdout.write("\033[?1049h\033[?25l")  # enter alt screen, hide cursor
+    sys.stdout.flush()
     try:
         while True:
-            print("\033[H\033[2J", end="")
-            print(render_table(include_stale=include_stale))
+            sys.stdout.write("\033[H\033[2J")  # home + clear
+            sys.stdout.write(render_table(include_stale=include_stale) + "\n")
+            sys.stdout.write(f"{DIM}(refresh {refresh_seconds:g}s — Ctrl-C to quit){RESET}\n")
+            sys.stdout.flush()
             time.sleep(refresh_seconds)
     except KeyboardInterrupt:
         return 130
+    finally:
+        sys.stdout.write("\033[?25h\033[?1049l")  # show cursor, leave alt screen
+        sys.stdout.flush()
 
 
 def find_record(session: str | None) -> dict[str, Any] | None:
