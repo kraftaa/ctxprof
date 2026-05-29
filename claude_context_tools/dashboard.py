@@ -321,23 +321,43 @@ def truncate(text: Any, width: int) -> str:
 
 CTX_BAR_W = 6  # context fill-bar width
 # (key, header, fixed_width|None, align, priority). Lower priority = kept longer
-# when the terminal is narrow. None width = flexible (repo, session).
+# when the terminal is narrow. None width = flexible (repo, label).
 COLUMNS = [
-    ("age", "AGE", 5, "r", 2),
-    ("model", "MODEL", 12, "l", 6),
+    ("age", "SEEN", 5, "r", 2),
+    ("mode", "MODE", 11, "l", 6),
+    ("agent", "AGENT", 10, "l", 9),
     ("repo", "REPO", None, "l", 1),
     ("context", "CONTEXT", CTX_BAR_W + 5, "l", 1),
+    ("rate", "5H/7D", 7, "r", 8),
     ("tokens", "TOKENS", 8, "r", 3),
     ("in", "IN", 7, "r", 7),
     ("out", "OUT", 7, "r", 8),
     ("cache", "CACHE R/W", 11, "r", 5),
     ("cost", "COST", 8, "r", 4),
-    ("time", "TIME", 7, "r", 6),
+    ("api", "API", 6, "r", 9),
+    ("time", "DUR", 7, "r", 6),
+    ("chg", "CHG", 11, "r", 10),
     ("recent", "RECENT", SPARK_POINTS, "r", 3),
-    ("session", "SESSION", None, "l", 2),
+    ("session", "ID", 8, "l", 5),
+    ("label", "LABEL", None, "l", 2),
 ]
-_FLEX_MIN = {"repo": 10, "session": 8}
+_FLEX_MIN = {"repo": 10, "label": 12}
+_FLEX_CAP = {"repo": 24, "label": 60}
 _SEP = 2
+
+
+def _mode_str(r: dict[str, Any]) -> str:
+    effort = str(r.get("effort") or "")
+    thinking = str(r.get("thinking") or "").lower() in ("true", "1", "yes")
+    return (effort + ("+think" if thinking else "")) or "-"
+
+
+def _chg_str(r: dict[str, Any]) -> str:
+    added = number(r.get("lines_added"))
+    removed = number(r.get("lines_removed"))
+    if added <= 0 and removed <= 0:
+        return "-"
+    return f"+{compact_int(added)}/-{compact_int(removed)}"
 
 
 def _layout_width(cols: list[tuple]) -> int:
@@ -358,11 +378,13 @@ def _select_columns(width: int) -> tuple[list[tuple], dict[str, int]]:
     leftover = width - fixed - _SEP * max(0, len(chosen) - 1)
     flex = [k for k, _, w, _, _ in chosen if w is None]
     widths: dict[str, int] = {}
-    if "repo" in flex:
-        widths["repo"] = max(10, min(24, leftover - (_FLEX_MIN["session"] if "session" in flex else 0)))
-        leftover -= widths["repo"]
-    if "session" in flex:
-        widths["session"] = max(8, leftover)
+    # Allocate repo first (capped), then give the rest to label.
+    for key in ("repo", "label"):
+        if key not in flex:
+            continue
+        reserve = sum(_FLEX_MIN[o] for o in flex if o != key and o not in widths)
+        widths[key] = max(_FLEX_MIN[key], min(_FLEX_CAP[key], leftover - reserve))
+        leftover -= widths[key]
     return chosen, widths
 
 
@@ -375,19 +397,27 @@ def _row_cells(r: dict[str, Any], now: float) -> tuple[dict[str, str], bool]:
         context = f"{ctx_color}{fill_bar(ctx / 100, CTX_BAR_W)}{RESET} {ctx:>3.0f}%"
     else:
         context = f"{'░' * CTX_BAR_W}    -"
+    rate5 = maybe_number(r.get("rate_pct"))
+    rate7 = maybe_number(r.get("seven_day_pct"))
+    rate = f"{rate5:.0f}/{rate7:.0f}%" if rate5 is not None and rate7 is not None else "-"
     cells = {
         "age": f"{age(seconds_since)}!" if is_stale else age(seconds_since),
-        "model": truncate(r.get("model"), 12),
+        "mode": _mode_str(r),
+        "agent": truncate(r.get("agent") or "", 10),
         "repo": str(r.get("repo") or "-"),
         "context": context,
+        "rate": rate,
         "tokens": compact_int(r.get("total_tokens")),
         "in": compact_int(r.get("input_tokens")),
         "out": compact_int(r.get("output_tokens")),
         "cache": f"{compact_int(r.get('cache_read_tokens'))}/{compact_int(r.get('cache_write_tokens'))}",
         "cost": f"${number(r.get('cost_usd')):.2f}",
+        "api": duration(r.get("api_duration_ms")),
         "time": duration(r.get("duration_ms")),
+        "chg": _chg_str(r),
         "recent": sparkline(str(r.get("session_id") or "")) or (" " * SPARK_POINTS),
-        "session": str(r.get("session_id") or "-"),
+        "session": str(r.get("session_id") or "-")[:8],
+        "label": str(r.get("session_name") or "-"),
     }
     return cells, is_stale
 
@@ -432,7 +462,7 @@ def render_table(include_stale: bool = False) -> str:
         for key, _, w, align, _ in columns:
             text = cells[key]
             cw = col_width(key, w)
-            if key in ("repo", "session"):
+            if key in ("repo", "label"):
                 text = truncate(text, cw)
             rendered.append(_pad(text, cw, align))
         row = "  ".join(rendered)
@@ -453,6 +483,73 @@ def render_table(include_stale: bool = False) -> str:
             lines.append(f"{DIM}RECENT = last {SPARK_POINTS} turns' token volume; {GREEN}green{DIM}=cached {CYAN}cyan{DIM}=fresh.{RESET}")
         lines.append(f"{DIM}Inspect one: ctx show <session-id>{RESET}")
 
+    return "\n".join(lines)
+
+
+def recent_steps(limit: int) -> list[dict[str, Any]]:
+    """Most recent per-turn step records across all sessions, newest first."""
+    steps_dir = STATE_DIR / "steps"
+    if not steps_dir.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for path in steps_dir.glob("*.jsonl"):
+        for line in _tail_lines(path, limit):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    rows.sort(key=lambda s: number(s.get("timestamp")), reverse=True)
+    return rows[:limit]
+
+
+# (key, header, width, align) for the per-turn steps feed.
+STEP_COLUMNS = [
+    ("age", "SEEN", 5, "r"),
+    ("step", "STEP", 5, "r"),
+    ("repo", "REPO", 22, "l"),
+    ("context", "CTX", 4, "r"),
+    ("tokens", "TOKENS", 7, "r"),
+    ("cache", "CACHE R/W", 11, "r"),
+    ("cost", "COST", 9, "r"),
+    ("api", "APIΔ", 6, "r"),
+    ("gap", "GAP", 6, "r"),
+    ("label", "LABEL", 28, "l"),
+]
+
+
+def render_steps(limit: int) -> str:
+    now = time.time()
+    steps = recent_steps(limit)
+    header = "  ".join(f"{_pad(h, w, a)}" for _, h, w, a in STEP_COLUMNS)
+    lines = [
+        f"{TEAL}Recent step costs{RESET}  (last {len(steps)} turns across all sessions)",
+        "",
+        f"{DIM}{header}{RESET}",
+    ]
+    for s in steps:
+        cost = number(s.get("delta_cost_usd"))
+        cost_color = RED if cost >= 1.0 else YELLOW if cost >= 0.25 else ""
+        cells = {
+            "age": age(now - number(s.get("timestamp"))),
+            "step": str(int(number(s.get("step_no")))),
+            "repo": truncate(s.get("repo") or "-", 22),
+            "context": f"{number(s.get('context_pct')):.0f}%",
+            "tokens": compact_int(s.get("delta_tokens")),
+            "cache": f"{compact_int(s.get('delta_cache_read_tokens'))}/{compact_int(s.get('delta_cache_write_tokens'))}",
+            "cost": f"{cost_color}${cost:.4f}{RESET}" if cost_color else f"${cost:.4f}",
+            "api": duration(s.get("delta_api_duration_ms")),
+            "gap": age(number(s.get("delta_seen_seconds"))),
+            "label": truncate(s.get("session_name") or "-", 28),
+        }
+        lines.append("  ".join(_pad(cells[k], w, a) for k, _, w, a in STEP_COLUMNS))
+    if not steps:
+        lines.append("No step data yet — needs the heartbeat statusline's steps/<session>.jsonl files.")
+    else:
+        lines.append("")
+        lines.append(f"{DIM}COST per turn; {YELLOW}yellow{DIM} >=$0.25, {RED}red{DIM} >=$1.00. GAP = wall time since the previous turn.{RESET}")
     return "\n".join(lines)
 
 
@@ -513,6 +610,7 @@ def show(session: str | None) -> int:
 
     out = [
         f"{TEAL}Session{RESET} {record.get('session_id')}",
+        line("label", record.get("session_name") or "-"),
         line("repo", record.get("repo") or "-"),
         line("model", record.get("model") or "-"),
         line("cwd", record.get("cwd") or "-"),
@@ -540,12 +638,17 @@ def main(argv: list[str] | None = None) -> int:
     dash.add_argument("--include-stale", action="store_true", help="include sessions older than the stale timeout")
     show_parser = subparsers.add_parser("show", help="print details + ready-to-run audit command for one session")
     show_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest active session")
+    steps_parser = subparsers.add_parser("steps", help="recent per-turn cost feed across all sessions")
+    steps_parser.add_argument("--limit", type=int, default=20, help="number of recent turns to show")
 
     args = parser.parse_args(argv)
     if args.command == "dashboard":
         return dashboard(args.refresh, args.include_stale)
     if args.command == "show":
         return show(args.session)
+    if args.command == "steps":
+        print(render_steps(max(1, args.limit)))
+        return 0
     return statusline()
 
 

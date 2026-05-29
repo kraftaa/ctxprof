@@ -160,9 +160,15 @@ class EndToEndCliTests(unittest.TestCase):
         self.assertIn("ctx audit", proc.stdout)
 
     def test_dashboard_table_cli(self):
+        # Wide COLUMNS so the responsive layout doesn't truncate the repo name.
         proc = self._run(["dashboard", "--refresh", "0", "--include-stale"],
-                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR), "COLUMNS": "200"})
         self.assertIn("sample-repo", proc.stdout)
+
+    def test_steps_cli(self):
+        proc = self._run(["steps", "--limit", "5"],
+                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR), "COLUMNS": "160"})
+        self.assertIn("Recent step costs", proc.stdout)
 
 
 if __name__ == "__main__":

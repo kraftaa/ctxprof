@@ -62,6 +62,10 @@ ctx dashboard --include-stale
 ctx show
 ctx show <session-id-or-prefix>
 
+# Recent per-turn cost feed across all sessions (catches expensive turns):
+ctx steps
+ctx steps --limit 40
+
 # Offline "why did it burn?" audit:
 ctx audit --latest
 ctx audit --session <session-id>
@@ -128,9 +132,17 @@ and these tools will read it. To wire it by hand instead:
 
 ## Dashboard notes
 
+- **LABEL** is the session name/task (from `session_name`) so you identify
+  sessions by what they're doing, not by UUID. **ID** is a short id prefix
+  (enough for `ctx show <prefix>`).
 - **CONTEXT** is a fill bar + percent; **RECENT** is a per-session sparkline of
   the last few turns' token volume, colored by cache share (green = cached,
   cyan = fresh) — the same signal as the heartbeat statusline's bar.
+- The table is **responsive**: on narrow terminals lower-priority columns
+  (MODE, AGENT, 5H/7D, IN/OUT, API, DUR, CHG) drop out, always keeping REPO,
+  the CONTEXT bar, COST, RECENT and LABEL.
+- `ctx steps` is a separate cross-session **per-turn** feed (STEP, CTX, tokens,
+  CACHE R/W, COST, APIΔ, GAP) — costs over $0.25/$1.00 a turn are highlighted.
 - **Stale sessions** are hidden by default; the header shows `stale-hidden:N` so
   you know they exist. `--include-stale` shows them dimmed with an `!`. The
   cutoff is `CLAUDE_STATUS_STALE_AFTER_SECONDS` (default 900s). An open session
