@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Live dashboard and offline context/cache audit for Claude Code sessions"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "Maria Dubyaga" }]
 keywords = ["claude", "claude-code", "statusline", "tokens", "cache", "observability"]
 classifiers = [
@@ -19,8 +19,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/maria/claude_workflow"
-Source = "https://github.com/maria/claude_workflow/tree/main/claude-context-tools"
+Homepage = "https://github.com/kraftaa/claude_workflow"
+Source = "https://github.com/kraftaa/claude_workflow/tree/main/claude-context-tools"
 
 [project.scripts]
 ctx = "claude_context_tools.cli:main"
@@ -34,4 +34,5 @@ include = [
     "claude_context_tools",
     "tests",
     "README.md",
+    "LICENSE",
 ]
