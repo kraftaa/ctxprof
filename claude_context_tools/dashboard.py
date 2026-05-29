@@ -11,11 +11,25 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible_len(text: str) -> int:
+    return len(_ANSI_RE.sub("", text))
+
+
+def _pad(text: str, width: int, align: str = "l") -> str:
+    gap = width - _visible_len(text)
+    if gap <= 0:
+        return text
+    return text + " " * gap if align == "l" else " " * gap + text
 
 
 STATE_DIR = Path(os.environ.get("CLAUDE_STATUS_STATE_DIR", "~/.claude/session-status")).expanduser()
@@ -305,6 +319,79 @@ def truncate(text: Any, width: int) -> str:
     return value[: width - 3] + "..."
 
 
+CTX_BAR_W = 6  # context fill-bar width
+# (key, header, fixed_width|None, align, priority). Lower priority = kept longer
+# when the terminal is narrow. None width = flexible (repo, session).
+COLUMNS = [
+    ("age", "AGE", 5, "r", 2),
+    ("model", "MODEL", 12, "l", 6),
+    ("repo", "REPO", None, "l", 1),
+    ("context", "CONTEXT", CTX_BAR_W + 5, "l", 1),
+    ("tokens", "TOKENS", 8, "r", 3),
+    ("in", "IN", 7, "r", 7),
+    ("out", "OUT", 7, "r", 8),
+    ("cache", "CACHE R/W", 11, "r", 5),
+    ("cost", "COST", 8, "r", 4),
+    ("time", "TIME", 7, "r", 6),
+    ("recent", "RECENT", SPARK_POINTS, "r", 3),
+    ("session", "SESSION", None, "l", 2),
+]
+_FLEX_MIN = {"repo": 10, "session": 8}
+_SEP = 2
+
+
+def _layout_width(cols: list[tuple]) -> int:
+    total = sum(w if w is not None else _FLEX_MIN[k] for k, _, w, _, _ in cols)
+    return total + _SEP * max(0, len(cols) - 1)
+
+
+def _select_columns(width: int) -> tuple[list[tuple], dict[str, int]]:
+    """Pick columns that fit `width` (essentials always kept), then size flex cols."""
+    chosen: list[tuple] = []
+    for col in sorted(COLUMNS, key=lambda c: c[4]):
+        if col[4] <= 1 or _layout_width(chosen + [col]) <= width:
+            chosen.append(col)
+    order = {c[0]: i for i, c in enumerate(COLUMNS)}
+    chosen.sort(key=lambda c: order[c[0]])
+
+    fixed = sum(w for _, _, w, _, _ in chosen if w is not None)
+    leftover = width - fixed - _SEP * max(0, len(chosen) - 1)
+    flex = [k for k, _, w, _, _ in chosen if w is None]
+    widths: dict[str, int] = {}
+    if "repo" in flex:
+        widths["repo"] = max(10, min(24, leftover - (_FLEX_MIN["session"] if "session" in flex else 0)))
+        leftover -= widths["repo"]
+    if "session" in flex:
+        widths["session"] = max(8, leftover)
+    return chosen, widths
+
+
+def _row_cells(r: dict[str, Any], now: float) -> tuple[dict[str, str], bool]:
+    seconds_since = now - number(r.get("updated_at"))
+    is_stale = seconds_since > STALE_AFTER_SECONDS
+    ctx = maybe_number(r.get("context_pct"))
+    ctx_color = RED if ctx is not None and ctx >= 80 else YELLOW if ctx is not None and ctx >= 60 else GREEN
+    if ctx is not None:
+        context = f"{ctx_color}{fill_bar(ctx / 100, CTX_BAR_W)}{RESET} {ctx:>3.0f}%"
+    else:
+        context = f"{'░' * CTX_BAR_W}    -"
+    cells = {
+        "age": f"{age(seconds_since)}!" if is_stale else age(seconds_since),
+        "model": truncate(r.get("model"), 12),
+        "repo": str(r.get("repo") or "-"),
+        "context": context,
+        "tokens": compact_int(r.get("total_tokens")),
+        "in": compact_int(r.get("input_tokens")),
+        "out": compact_int(r.get("output_tokens")),
+        "cache": f"{compact_int(r.get('cache_read_tokens'))}/{compact_int(r.get('cache_write_tokens'))}",
+        "cost": f"${number(r.get('cost_usd')):.2f}",
+        "time": duration(r.get("duration_ms")),
+        "recent": sparkline(str(r.get("session_id") or "")) or (" " * SPARK_POINTS),
+        "session": str(r.get("session_id") or "-"),
+    }
+    return cells, is_stale
+
+
 def render_table(include_stale: bool = False) -> str:
     now = time.time()
     all_records = load_records(include_stale=True)
@@ -315,8 +402,10 @@ def render_table(include_stale: bool = False) -> str:
     hidden = len(all_records) - len(records)
 
     width = shutil.get_terminal_size((140, 30)).columns
-    repo_width = max(12, min(24, width - 116))
-    ctx_w = 6  # context fill bar width
+    columns, flex_w = _select_columns(width)
+
+    def col_width(key: str, fixed: int | None) -> int:
+        return flex_w[key] if fixed is None else fixed
 
     total_cost = sum(number(r.get("cost_usd")) for r in records)
     total_tokens = sum(number(r.get("total_tokens")) for r in records)
@@ -328,47 +417,26 @@ def render_table(include_stale: bool = False) -> str:
         + (f"  {DIM}stale-hidden:{hidden}{RESET}" if hidden and not include_stale else "")
         + f"  live-ctx:{compact_int(total_tokens)}  cost:${total_cost:.2f}  max_ctx:{max_ctx:.0f}%  max_5h:{max_rate:.0f}%"
     )
-    lines = [
-        header_summary,
-        "",
-        (
-            f"{DIM}{'AGE':>5}  {'MODEL':<12}  {'REPO':<{repo_width}}  {'CONTEXT':<{ctx_w + 5}}  {'TOKENS':>8}  "
-            f"{'IN':>7}  {'OUT':>7}  {'CACHE R/W':>11}  {'COST':>8}  {'TIME':>7}  {'RECENT':>{SPARK_POINTS}}  SESSION{RESET}"
-        ),
-    ]
+    header_row = "  ".join(
+        _pad(header, col_width(key, w), align) for key, header, w, align, _ in columns
+    )
+    lines = [header_summary, "", f"{DIM}{header_row}{RESET}"]
 
     stale_count = 0
+    shown_keys = {c[0] for c in columns}
     for r in records:
-        session = truncate(r.get("session_id"), max(8, width - repo_width - 120))
-        cache = f"{compact_int(r.get('cache_read_tokens'))}/{compact_int(r.get('cache_write_tokens'))}"
-        ctx = maybe_number(r.get("context_pct"))
-        ctx_color = RED if ctx is not None and ctx >= 80 else YELLOW if ctx is not None and ctx >= 60 else GREEN
-        if ctx is not None:
-            ctx_cell = f"{ctx_color}{fill_bar(ctx / 100, ctx_w)}{RESET} {ctx:>3.0f}%"
-        else:
-            ctx_cell = f"{'░' * ctx_w}    -"
-        seconds_since = now - number(r.get("updated_at"))
-        is_stale = seconds_since > STALE_AFTER_SECONDS
-        age_text = f"{age(seconds_since)}!" if is_stale else age(seconds_since)
+        cells, is_stale = _row_cells(r, now)
         if is_stale:
             stale_count += 1
-        spark = sparkline(str(r.get("session_id") or "")) or (" " * SPARK_POINTS)
-        row = (
-            f"{age_text:>5}  "
-            f"{truncate(r.get('model'), 12):<12}  "
-            f"{truncate(r.get('repo'), repo_width):<{repo_width}}  "
-            f"{ctx_cell}  "
-            f"{compact_int(r.get('total_tokens')):>8}  "
-            f"{compact_int(r.get('input_tokens')):>7}  "
-            f"{compact_int(r.get('output_tokens')):>7}  "
-            f"{cache:>11}  "
-            f"${number(r.get('cost_usd')):>7.2f}  "
-            f"{duration(r.get('duration_ms')):>7}  "
-            f"{spark}  "
-            f"{session}"
-        )
-        # Dim stale rows so live sessions stand out; the cumulative cost/time on
-        # a stale row is a frozen session total, not ongoing spend.
+        rendered = []
+        for key, _, w, align, _ in columns:
+            text = cells[key]
+            cw = col_width(key, w)
+            if key in ("repo", "session"):
+                text = truncate(text, cw)
+            rendered.append(_pad(text, cw, align))
+        row = "  ".join(rendered)
+        # Dim stale rows; their cumulative cost/time is frozen, not ongoing spend.
         lines.append(f"{DIM}{row}{RESET}" if is_stale else row)
 
     if not records:
@@ -381,7 +449,9 @@ def render_table(include_stale: bool = False) -> str:
         elif hidden:
             notes.append(f"{hidden} idle >{age(STALE_AFTER_SECONDS)} hidden (use --include-stale).")
         lines.append(f"{DIM}{'  '.join(notes)}{RESET}")
-        lines.append(f"{DIM}RECENT = last {SPARK_POINTS} turns' token volume; {GREEN}green{DIM}=cached {CYAN}cyan{DIM}=fresh. Inspect: ctx show <session-id>{RESET}")
+        if "recent" in shown_keys:
+            lines.append(f"{DIM}RECENT = last {SPARK_POINTS} turns' token volume; {GREEN}green{DIM}=cached {CYAN}cyan{DIM}=fresh.{RESET}")
+        lines.append(f"{DIM}Inspect one: ctx show <session-id>{RESET}")
 
     return "\n".join(lines)
 
