@@ -36,6 +36,71 @@ TEAL = "\033[38;5;37m"
 GREEN = "\033[38;5;70m"
 YELLOW = "\033[38;5;178m"
 RED = "\033[38;5;203m"
+CYAN = "\033[38;5;38m"
+
+SPARK_BLOCKS = "▁▂▃▄▆█"
+SPARK_POINTS = 12
+
+
+def fill_bar(fraction: float, width: int = 6) -> str:
+    """A solid █/░ bar for a 0..1 fraction (used for context fill)."""
+    fraction = 0.0 if fraction < 0 else 1.0 if fraction > 1 else fraction
+    filled = int(round(fraction * width))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _tail_lines(path: Path, n: int) -> list[str]:
+    """Read roughly the last n lines of a file without loading the whole thing."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            # Step lines are ~800 bytes each; over-read so we reliably get n full lines.
+            block = min(size, max(4096, n * 1200))
+            handle.seek(size - block)
+            data = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    return data.splitlines()[-n:]
+
+
+def sparkline(session_id: str, points: int = SPARK_POINTS) -> str:
+    """Recent per-turn token bars, colored by cache share (green=cached, cyan=fresh).
+
+    Mirrors the heartbeat statusline's sparkline so the dashboard shows the same
+    at-a-glance activity per session. Returns "" when no step data exists.
+    """
+    path = STATE_DIR / "steps" / f"{session_id}.jsonl"
+    if not path.exists():
+        return ""
+    totals: list[float] = []
+    shares: list[float] = []
+    for line in _tail_lines(path, points):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            step = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        inp = number(step.get("delta_input_tokens"))
+        out = number(step.get("delta_output_tokens"))
+        cache = number(step.get("delta_cache_read_tokens")) + number(step.get("delta_cache_write_tokens"))
+        fresh = max(0.0, inp - cache)
+        total = fresh + out + cache
+        totals.append(total)
+        shares.append(cache / total if total > 0 else 0.0)
+    if not totals:
+        return ""
+    peak = max(totals) or 1.0
+    cells = []
+    for total, share in zip(totals, shares):
+        ratio = total / peak
+        idx = min(len(SPARK_BLOCKS) - 1, int(ratio * (len(SPARK_BLOCKS) - 1) + 0.999)) if ratio > 0 else 0
+        color = GREEN if share >= 0.75 else YELLOW if share >= 0.25 else CYAN
+        cells.append(f"{color}{SPARK_BLOCKS[idx]}{RESET}")
+    pad = points - len(cells)
+    return (" " * pad) + "".join(cells)
 
 
 def nested(data: dict[str, Any], path: str, default: Any = None) -> Any:
@@ -241,48 +306,65 @@ def truncate(text: Any, width: int) -> str:
 
 
 def render_table(include_stale: bool = False) -> str:
-    records = load_records(include_stale=include_stale)
     now = time.time()
-    width = shutil.get_terminal_size((120, 30)).columns
-    repo_width = max(14, min(28, width - 92))
+    all_records = load_records(include_stale=True)
+    if include_stale:
+        records = all_records
+    else:
+        records = [r for r in all_records if now - number(r.get("updated_at")) <= STALE_AFTER_SECONDS]
+    hidden = len(all_records) - len(records)
+
+    width = shutil.get_terminal_size((140, 30)).columns
+    repo_width = max(12, min(24, width - 116))
+    ctx_w = 6  # context fill bar width
 
     total_cost = sum(number(r.get("cost_usd")) for r in records)
     total_tokens = sum(number(r.get("total_tokens")) for r in records)
     max_ctx = max([number(r.get("context_pct")) for r in records if r.get("context_pct") is not None] or [0])
     max_rate = max([number(r.get("rate_pct")) for r in records if r.get("rate_pct") is not None] or [0])
 
+    header_summary = (
+        f"{TEAL}Claude sessions{RESET}  active:{len(records)}"
+        + (f"  {DIM}stale-hidden:{hidden}{RESET}" if hidden and not include_stale else "")
+        + f"  live-ctx:{compact_int(total_tokens)}  cost:${total_cost:.2f}  max_ctx:{max_ctx:.0f}%  max_5h:{max_rate:.0f}%"
+    )
     lines = [
-        f"{TEAL}Claude sessions{RESET}  active:{len(records)}  tokens:{compact_int(total_tokens)}  cost:${total_cost:.2f}  max_ctx:{max_ctx:.0f}%  max_5h:{max_rate:.0f}%",
+        header_summary,
         "",
         (
-            f"{DIM}{'AGE':>5}  {'MODEL':<12}  {'REPO':<{repo_width}}  {'CTX':>4}  {'TOKENS':>8}  "
-            f"{'IN':>7}  {'OUT':>7}  {'CACHE R/W':>11}  {'COST':>7}  {'TIME':>7}  SESSION{RESET}"
+            f"{DIM}{'AGE':>5}  {'MODEL':<12}  {'REPO':<{repo_width}}  {'CONTEXT':<{ctx_w + 5}}  {'TOKENS':>8}  "
+            f"{'IN':>7}  {'OUT':>7}  {'CACHE R/W':>11}  {'COST':>8}  {'TIME':>7}  {'RECENT':>{SPARK_POINTS}}  SESSION{RESET}"
         ),
     ]
 
     stale_count = 0
     for r in records:
-        session = truncate(r.get("session_id"), max(8, width - repo_width - 95))
+        session = truncate(r.get("session_id"), max(8, width - repo_width - 120))
         cache = f"{compact_int(r.get('cache_read_tokens'))}/{compact_int(r.get('cache_write_tokens'))}"
         ctx = maybe_number(r.get("context_pct"))
-        ctx_text = f"{ctx:>3.0f}%" if ctx is not None else "   -"
         ctx_color = RED if ctx is not None and ctx >= 80 else YELLOW if ctx is not None and ctx >= 60 else GREEN
+        if ctx is not None:
+            ctx_cell = f"{ctx_color}{fill_bar(ctx / 100, ctx_w)}{RESET} {ctx:>3.0f}%"
+        else:
+            ctx_cell = f"{'░' * ctx_w}    -"
         seconds_since = now - number(r.get("updated_at"))
         is_stale = seconds_since > STALE_AFTER_SECONDS
         age_text = f"{age(seconds_since)}!" if is_stale else age(seconds_since)
         if is_stale:
             stale_count += 1
+        spark = sparkline(str(r.get("session_id") or "")) or (" " * SPARK_POINTS)
         row = (
             f"{age_text:>5}  "
             f"{truncate(r.get('model'), 12):<12}  "
             f"{truncate(r.get('repo'), repo_width):<{repo_width}}  "
-            f"{ctx_color}{ctx_text}{RESET}  "
+            f"{ctx_cell}  "
             f"{compact_int(r.get('total_tokens')):>8}  "
             f"{compact_int(r.get('input_tokens')):>7}  "
             f"{compact_int(r.get('output_tokens')):>7}  "
             f"{cache:>11}  "
-            f"${number(r.get('cost_usd')):>6.2f}  "
+            f"${number(r.get('cost_usd')):>7.2f}  "
             f"{duration(r.get('duration_ms')):>7}  "
+            f"{spark}  "
             f"{session}"
         )
         # Dim stale rows so live sessions stand out; the cumulative cost/time on
@@ -293,13 +375,13 @@ def render_table(include_stale: bool = False) -> str:
         lines.append("No active sessions yet. Start Claude Code with the heartbeat statusline configured.")
     else:
         lines.append("")
-        notes = ["COST and TIME are cumulative session totals (not per-refresh)."]
+        notes = ["COST/TIME are cumulative session totals; live-ctx/IN/OUT are the current context, not lifetime."]
         if stale_count:
-            notes.append(f"{stale_count} stale (age!) session(s) shown — last heartbeat over {age(STALE_AFTER_SECONDS)} ago.")
-        else:
-            notes.append(f"Sessions idle over {age(STALE_AFTER_SECONDS)} are hidden (use --include-stale to show them).")
+            notes.append(f"{stale_count} stale (age!) shown.")
+        elif hidden:
+            notes.append(f"{hidden} idle >{age(STALE_AFTER_SECONDS)} hidden (use --include-stale).")
         lines.append(f"{DIM}{'  '.join(notes)}{RESET}")
-        lines.append(f"{DIM}Inspect one: ctx show <session-id>{RESET}")
+        lines.append(f"{DIM}RECENT = last {SPARK_POINTS} turns' token volume; {GREEN}green{DIM}=cached {CYAN}cyan{DIM}=fresh. Inspect: ctx show <session-id>{RESET}")
 
     return "\n".join(lines)
 

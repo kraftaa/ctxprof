@@ -128,11 +128,16 @@ and these tools will read it. To wire it by hand instead:
 
 ## Dashboard notes
 
-- **Stale sessions** are hidden by default; `--include-stale` shows them dimmed
-  with an `!`. The cutoff is `CLAUDE_STATUS_STALE_AFTER_SECONDS` (default 900s).
-- **COST and TIME are cumulative session totals**, not per-refresh. An old
-  session legitimately shows a large frozen total — its lifetime total at the
-  last heartbeat, not ongoing spend.
+- **CONTEXT** is a fill bar + percent; **RECENT** is a per-session sparkline of
+  the last few turns' token volume, colored by cache share (green = cached,
+  cyan = fresh) — the same signal as the heartbeat statusline's bar.
+- **Stale sessions** are hidden by default; the header shows `stale-hidden:N` so
+  you know they exist. `--include-stale` shows them dimmed with an `!`. The
+  cutoff is `CLAUDE_STATUS_STALE_AFTER_SECONDS` (default 900s). An open session
+  that's idle (not generating turns) stops writing heartbeats and goes stale.
+- **COST and TIME are cumulative session totals**; **live-ctx / IN / OUT** are
+  the current context, not lifetime. An old session legitimately shows a large
+  frozen cost/time — its lifetime total at the last heartbeat, not ongoing spend.
 
 ## Files written
 
