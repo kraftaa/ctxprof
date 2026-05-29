@@ -118,6 +118,12 @@ class CacheClassificationTests(unittest.TestCase):
         self.assertIsNotNone(share)
         self.assertTrue(0.0 <= share <= 1.0)
 
+    def test_fresh_excludes_cache_write(self):
+        # Fixture step 4: input 1000, cache_read 500, cache_write 18000.
+        # Fresh new input = input - cache_read = 500 (NOT input - read - write -> 0).
+        step4 = next(i for i in self.result["cache_invalidations"] if i["step"] == 4)
+        self.assertEqual(step4["fresh"], 500)
+
 
 class JsonPayloadTests(unittest.TestCase):
     def test_build_payload_schema(self):

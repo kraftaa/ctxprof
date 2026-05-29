@@ -223,7 +223,10 @@ def analyze_steps(steps: list[dict[str, Any]]) -> dict[str, Any]:
         cache_total = delta_cache_read + delta_cache_write
         read_share = delta_cache_read / cache_total if cache_total > 0 else 0.0
         write_share = delta_cache_write / cache_total if cache_total > 0 else 0.0
-        fresh = max(0.0, delta_input - cache_total)
+        # total_input_tokens includes cache *reads* + fresh input; cache *writes*
+        # (creation) are billed separately and are NOT part of input. So fresh
+        # genuinely-new input = input - cache_read (not - cache_read - cache_write).
+        fresh = max(0.0, delta_input - delta_cache_read)
         was_warm = cum_cache_read >= CACHE_WARM_THRESHOLD
 
         if delta_cache_write >= CACHE_WRITE_FLOOR:
