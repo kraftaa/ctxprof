@@ -1,0 +1,20 @@
+{
+  "session_id": "00000000-aaaa-bbbb-cccc-000000000001",
+  "updated_at": 1700000000,
+  "model": "Opus 4.8 (1M context)",
+  "agent": "",
+  "repo": "sample-repo",
+  "cwd": "/repo",
+  "project_dir": "/repo",
+  "context_pct": 12,
+  "context_size": 1000000,
+  "rate_pct": 1,
+  "input_tokens": 50000,
+  "output_tokens": 1200,
+  "cache_read_tokens": 47000,
+  "cache_write_tokens": 3000,
+  "total_tokens": 51200,
+  "cost_usd": 0.42,
+  "duration_ms": 600000,
+  "transcript_path": "/Users/maria/Documents/GitHub/extra/claude_workflow/scripts/tests/fixtures/transcript/00000000-aaaa-bbbb-cccc-000000000001.jsonl"
+}

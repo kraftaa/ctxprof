@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Fixture-based smoke tests for the Claude context/cache tools.
+
+Stdlib only (unittest). Run:
+
+    python3 tests/test_claude_context_tools.py
+    # or
+    python3 -m unittest discover -s tests
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+PKG_ROOT = Path(__file__).resolve().parents[1]  # the claude-context-tools dir
+sys.path.insert(0, str(PKG_ROOT))
+
+from claude_context_tools import audit, dashboard  # noqa: E402
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+SESSION = "00000000-aaaa-bbbb-cccc-000000000001"
+TRANSCRIPT = FIXTURES / "transcript" / f"{SESSION}.jsonl"
+STATE_DIR = FIXTURES / "state"  # holds <session>.json + steps/, like ~/.claude/session-status
+STEPS = STATE_DIR / "steps" / f"{SESSION}.jsonl"
+
+
+class HelperTests(unittest.TestCase):
+    def test_compact_int(self):
+        self.assertEqual(audit.compact_int(None), "-")
+        self.assertEqual(audit.compact_int(500), "500")
+        self.assertEqual(audit.compact_int(1500), "1.5k")
+        self.assertEqual(audit.compact_int(2_000_000), "2.0M")
+
+    def test_est_tokens(self):
+        self.assertEqual(audit.est_tokens(0), 0)
+        self.assertEqual(audit.est_tokens(4), 1)
+        self.assertEqual(audit.est_tokens(400), 100)
+
+    def test_duration_and_age(self):
+        self.assertEqual(dashboard.duration(0), "0m")
+        self.assertEqual(dashboard.duration(3_600_000), "1h00m")
+        self.assertEqual(dashboard.age(30), "30s")
+        self.assertEqual(dashboard.age(120), "2m")
+
+
+class ExtractRecordTests(unittest.TestCase):
+    def test_unknown_is_not_zero(self):
+        # No usage fields at all -> token fields stay None (unknown), not 0.
+        record = dashboard.extract_record({"session_id": "x", "model": {"display_name": "M"}})
+        self.assertIsNone(record["input_tokens"])
+        self.assertIsNone(record["total_tokens"])
+        self.assertIsNone(record["context_pct"])
+        self.assertEqual(record["model"], "M")
+
+    def test_totals_sum_when_present(self):
+        data = {
+            "session_id": "y",
+            "context_window": {"current_usage": {
+                "input_tokens": 100, "output_tokens": 10,
+                "cache_read_input_tokens": 50, "cache_creation_input_tokens": 5,
+            }},
+        }
+        record = dashboard.extract_record(data)
+        self.assertEqual(record["input_tokens"], 100)
+        self.assertEqual(record["total_tokens"], 165)
+
+
+class AnalyzeTranscriptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        rows = audit.read_jsonl(TRANSCRIPT)
+        cls.analysis = audit.analyze(rows, status=None, steps=[])
+
+    def test_categories_present(self):
+        cats = self.analysis["category_chars"]
+        self.assertIn("assistant text", cats)
+        self.assertIn("attachment:skill_listing", cats)
+        self.assertTrue(any(k.startswith("Bash") for k in cats))
+
+    def test_repeated_read_detected(self):
+        reads = {path for _, _, path in self.analysis["repeated_reads"]}
+        self.assertIn("/repo/src/auth.py", reads)
+
+    def test_duplicate_blob_detected(self):
+        self.assertTrue(self.analysis["duplicate_waste"], "identical Read results should be flagged")
+
+    def test_large_bash_result_detected(self):
+        tools = {tool for _, tool, _ in self.analysis["large_results"]}
+        self.assertIn("Bash", tools)
+
+    def test_agent_report_detected(self):
+        self.assertTrue(self.analysis["agent_reports"])
+
+
+class CacheClassificationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        steps = audit.read_jsonl(STEPS)
+        cls.result = audit.analyze_steps(steps)
+
+    def test_step1_is_warmup_not_invalidation(self):
+        warm_steps = {w["step"] for w in self.result["cache_warmups"]}
+        invalid_steps = {i["step"] for i in self.result["cache_invalidations"]}
+        self.assertIn(1, warm_steps)
+        self.assertNotIn(1, invalid_steps)
+
+    def test_late_rewrite_is_invalidation(self):
+        invalid_steps = {i["step"] for i in self.result["cache_invalidations"]}
+        self.assertIn(4, invalid_steps)
+
+    def test_read_share_is_fraction(self):
+        share = self.result["cache_read_share"]
+        self.assertIsNotNone(share)
+        self.assertTrue(0.0 <= share <= 1.0)
+
+
+class JsonPayloadTests(unittest.TestCase):
+    def test_build_payload_schema(self):
+        rows = audit.read_jsonl(TRANSCRIPT)
+        steps = audit.read_jsonl(STEPS)
+        analysis = audit.analyze(rows, status=None, steps=steps)
+        payload = audit.build_payload(TRANSCRIPT, analysis, limit=8)
+        self.assertEqual(payload["schema"], "claude-context-audit/1")
+        self.assertTrue(payload["cache"]["has_step_data"])
+        self.assertIn("recommendations", payload)
+        # Must be JSON-serializable.
+        json.dumps(payload)
+
+
+class EndToEndCliTests(unittest.TestCase):
+    """Exercise the `claude-ctx` umbrella via `python -m`, no install needed."""
+
+    def _run(self, args, **kw):
+        env = dict(os.environ, PYTHONPATH=str(PKG_ROOT), **kw.pop("env", {}))
+        return subprocess.run(
+            [sys.executable, "-m", "claude_context_tools.cli", *args],
+            capture_output=True, text=True, env=env, check=True,
+        )
+
+    def test_audit_json_cli(self):
+        proc = self._run(["audit", "--transcript", str(TRANSCRIPT),
+                          "--state-dir", str(STATE_DIR), "--json"])
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["schema"], "claude-context-audit/1")
+
+    def test_dashboard_show_cli(self):
+        proc = self._run(["show", SESSION], env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        self.assertIn("sample-repo", proc.stdout)
+        self.assertIn("ctx audit", proc.stdout)
+
+    def test_dashboard_table_cli(self):
+        proc = self._run(["dashboard", "--refresh", "0", "--include-stale"],
+                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        self.assertIn("sample-repo", proc.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
