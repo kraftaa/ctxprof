@@ -553,6 +553,216 @@ def render_steps(limit: int) -> str:
     return "\n".join(lines)
 
 
+def parse_since(value: str | None) -> float | None:
+    """Parse a duration like '90s', '30m', '2h', '1d' into seconds. None if empty."""
+    if not value:
+        return None
+    value = value.strip().lower()
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    mult = units.get(value[-1])
+    try:
+        return float(value[:-1]) * mult if mult else float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def step_view(s: dict[str, Any], now: float) -> dict[str, Any]:
+    """Normalize a raw heartbeat step row into a stable, analyzable record."""
+    return {
+        "session_id": s.get("session_id"),
+        "step": int(number(s.get("step_no"))),
+        "repo": s.get("repo"),
+        "label": s.get("session_name"),
+        "timestamp": number(s.get("timestamp")),
+        "age_s": round(now - number(s.get("timestamp")), 1),
+        "context_pct": number(s.get("context_pct")),
+        "tokens": number(s.get("delta_tokens")),
+        "input": number(s.get("delta_input_tokens")),
+        "output": number(s.get("delta_output_tokens")),
+        "cache_read": number(s.get("delta_cache_read_tokens")),
+        "cache_write": number(s.get("delta_cache_write_tokens")),
+        "cost_usd": round(number(s.get("delta_cost_usd")), 6),
+        "api_ms": number(s.get("delta_api_duration_ms")),
+        "gap_s": number(s.get("delta_seen_seconds")),
+        "lines_added": number(s.get("delta_lines_added")),
+        "lines_removed": number(s.get("delta_lines_removed")),
+    }
+
+
+def collect_steps(limit: int, since_seconds: float | None) -> list[dict[str, Any]]:
+    now = time.time()
+    views = [step_view(s, now) for s in recent_steps(limit)]
+    if since_seconds is not None:
+        views = [v for v in views if v["age_s"] <= since_seconds]
+    return views
+
+
+def build_digest(views: list[dict[str, Any]]) -> dict[str, Any]:
+    """Roll up step records into the 'what mattered' summary."""
+    by_session: dict[str, dict[str, Any]] = {}
+    for v in views:
+        sid = str(v.get("session_id") or "-")
+        agg = by_session.setdefault(sid, {"session_id": sid, "label": v.get("label"),
+                                          "repo": v.get("repo"), "turns": 0, "cost_usd": 0.0, "tokens": 0.0})
+        agg["turns"] += 1
+        agg["cost_usd"] += v["cost_usd"]
+        agg["tokens"] += v["tokens"]
+    top = lambda key, n=8: sorted(views, key=lambda v: v[key], reverse=True)[:n]
+    return {
+        "turns": len(views),
+        "sessions": len(by_session),
+        "total_cost_usd": round(sum(v["cost_usd"] for v in views), 4),
+        "total_tokens": sum(v["tokens"] for v in views),
+        "top_cost_turns": top("cost_usd"),
+        "biggest_cache_writes": [v for v in top("cache_write") if v["cache_write"] > 0],
+        "longest_gaps": top("gap_s"),
+        "by_session": sorted(by_session.values(), key=lambda a: a["cost_usd"], reverse=True),
+    }
+
+
+def render_digest(limit: int, since: str | None, as_json: bool) -> str:
+    since_seconds = parse_since(since)
+    views = collect_steps(limit, since_seconds)
+    digest = build_digest(views)
+    if as_json:
+        return json.dumps(digest, indent=2, sort_keys=True)
+    if not views:
+        return "No step data yet — needs the heartbeat statusline's steps/<session>.jsonl files."
+
+    window = f"last {since}" if since else f"last {len(views)} turns"
+    lines = [
+        f"{TEAL}Step digest{RESET}  ({window} across {digest['sessions']} session(s))",
+        f"  totals: ${digest['total_cost_usd']:.2f}  {compact_int(digest['total_tokens'])} tok  {digest['turns']} turns",
+        "",
+        f"{DIM}Per session (by cost):{RESET}",
+    ]
+    for a in digest["by_session"]:
+        lines.append(f"  ${a['cost_usd']:>7.2f}  {a['turns']:>4} turns  {compact_int(a['tokens']):>7}  "
+                     f"{truncate(a['repo'] or '-', 18):<18}  {truncate(a['label'] or '-', 40)}")
+    lines.append(f"\n{DIM}Top-cost turns:{RESET}")
+    for v in digest["top_cost_turns"]:
+        c = v["cost_usd"]
+        col = RED if c >= 1.0 else YELLOW if c >= 0.25 else ""
+        lines.append(f"  {col}${c:>7.4f}{RESET if col else ''}  step {v['step']:>5}  ctx {v['context_pct']:>3.0f}%  "
+                     f"{truncate(v['repo'] or '-', 20)}")
+    lines.append(f"\n{DIM}Biggest cache writes (likely invalidation):{RESET}")
+    for v in digest["biggest_cache_writes"]:
+        lines.append(f"  {compact_int(v['cache_write']):>8} tok  step {v['step']:>5}  read {compact_int(v['cache_read'])}  "
+                     f"{truncate(v['repo'] or '-', 20)}")
+    lines.append(f"\n{DIM}Longest idle gaps before a turn:{RESET}")
+    for v in digest["longest_gaps"]:
+        lines.append(f"  {age(v['gap_s']):>6}  step {v['step']:>5}  {truncate(v['repo'] or '-', 20)}")
+    return "\n".join(lines)
+
+
+def tui(limit: int) -> int:
+    """Scrollable/filterable curses browser for the per-turn step feed."""
+    if not sys.stdout.isatty():
+        print(f"{RED}ctx tui needs an interactive terminal (try `ctx steps` / `ctx digest` instead).{RESET}")
+        return 1
+    try:
+        import curses
+    except ImportError:
+        print(f"{RED}curses is unavailable on this platform; use `ctx steps`.{RESET}")
+        return 1
+
+    now = time.time()
+    all_views = [step_view(s, now) for s in recent_steps(limit)]
+
+    def run(stdscr: "curses._CursesWindow") -> None:
+        curses.curs_set(0)
+        curses.use_default_colors()
+        for i in range(1, 5):
+            curses.init_pair(i, [curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_RED, curses.COLOR_CYAN][i - 1], -1)
+        GREENP, YELLOWP, REDP, CYANP = 1, 2, 3, 4
+        sel, top, filt, typing = 0, 0, "", False
+        while True:
+            views = [v for v in all_views if not filt or filt.lower() in str(v.get("repo") or "").lower()
+                     or filt.lower() in str(v.get("label") or "").lower()]
+            sel = max(0, min(sel, len(views) - 1)) if views else 0
+            h, w = stdscr.getmaxyx()
+            body = h - 4
+            if sel < top:
+                top = sel
+            elif sel >= top + body:
+                top = sel - body + 1
+            stdscr.erase()
+            stdscr.addnstr(0, 0, f" ctx tui — {len(views)} turns   "
+                           f"[↑↓/jk move  / filter  enter=detail  q quit]", w - 1, curses.A_BOLD)
+            stdscr.addnstr(1, 0, f" {'SEEN':>5}  {'STEP':>5}  {'REPO':<18}  {'CTX':>4}  {'TOKENS':>7}  "
+                           f"{'CACHE R/W':>11}  {'COST':>9}  {'GAP':>6}  LABEL", w - 1, curses.A_DIM)
+            for idx in range(top, min(len(views), top + body)):
+                v = views[idx]
+                c = v["cost_usd"]
+                line = (f" {age(now - v['timestamp']):>5}  {v['step']:>5}  {truncate(v['repo'] or '-', 18):<18}  "
+                        f"{v['context_pct']:>3.0f}%  {compact_int(v['tokens']):>7}  "
+                        f"{compact_int(v['cache_read'])}/{compact_int(v['cache_write']):>11}  "
+                        f"${c:>7.4f}  {age(v['gap_s']):>6}  {truncate(v['label'] or '-', max(4, w - 70))}")
+                attr = curses.A_REVERSE if idx == sel else 0
+                if c >= 1.0:
+                    attr |= curses.color_pair(REDP)
+                elif c >= 0.25:
+                    attr |= curses.color_pair(YELLOWP)
+                stdscr.addnstr(2 + idx - top, 0, line, w - 1, attr)
+            status = f" filter: {filt}_" if typing else (f" filter: {filt}  (/ to change)" if filt else "")
+            stdscr.addnstr(h - 1, 0, status, w - 1, curses.A_DIM)
+            stdscr.refresh()
+
+            ch = stdscr.getch()
+            if typing:
+                if ch in (10, 13):
+                    typing = False
+                elif ch in (27,):
+                    typing, filt = False, ""
+                elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                    filt = filt[:-1]
+                elif 32 <= ch < 127:
+                    filt += chr(ch)
+                continue
+            if ch in (ord("q"), 27):
+                break
+            elif ch in (curses.KEY_DOWN, ord("j")):
+                sel += 1
+            elif ch in (curses.KEY_UP, ord("k")):
+                sel -= 1
+            elif ch == curses.KEY_NPAGE:
+                sel += body
+            elif ch == curses.KEY_PPAGE:
+                sel -= body
+            elif ch == ord("/"):
+                typing, filt = True, ""
+            elif ch in (10, 13) and views:
+                _tui_detail(stdscr, views[sel], now)
+
+    def _tui_detail(stdscr, v, now):
+        h, w = stdscr.getmaxyx()
+        rows = [
+            f"step {v['step']}  —  {v.get('repo') or '-'}",
+            f"label    {v.get('label') or '-'}",
+            f"session  {v.get('session_id') or '-'}",
+            f"seen     {age(now - v['timestamp'])} ago   gap before {age(v['gap_s'])}",
+            f"context  {v['context_pct']:.0f}%",
+            f"tokens   total {compact_int(v['tokens'])}  in {compact_int(v['input'])}  out {compact_int(v['output'])}",
+            f"cache    read {compact_int(v['cache_read'])}  write {compact_int(v['cache_write'])}",
+            f"cost     ${v['cost_usd']:.4f}   api {duration(v['api_ms'])}",
+            f"lines    +{int(v['lines_added'])}/-{int(v['lines_removed'])}",
+            "",
+            "press any key to go back",
+        ]
+        stdscr.erase()
+        for i, line in enumerate(rows):
+            if i < h - 1:
+                stdscr.addnstr(i, 0, line, w - 1)
+        stdscr.refresh()
+        stdscr.getch()
+
+    try:
+        curses.wrapper(run)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def dashboard(refresh_seconds: float, include_stale: bool) -> int:
     # Print once if a one-shot was requested, OR if stdout is not an interactive
     # terminal (piped, captured, or run via a non-tty runner) — looping there
@@ -640,6 +850,13 @@ def main(argv: list[str] | None = None) -> int:
     show_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest active session")
     steps_parser = subparsers.add_parser("steps", help="recent per-turn cost feed across all sessions")
     steps_parser.add_argument("--limit", type=int, default=20, help="number of recent turns to show")
+    steps_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON (great for `!ctx steps --json` inside Claude)")
+    digest_parser = subparsers.add_parser("digest", help="rollup summary of recent turns (cost, cache writes, gaps)")
+    digest_parser.add_argument("--limit", type=int, default=1000, help="max recent turns per session to scan")
+    digest_parser.add_argument("--since", help="only turns newer than e.g. 30m, 2h, 1d")
+    digest_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    tui_parser = subparsers.add_parser("tui", help="interactive scrollable/filterable step browser")
+    tui_parser.add_argument("--limit", type=int, default=500, help="number of recent turns to load")
 
     args = parser.parse_args(argv)
     if args.command == "dashboard":
@@ -647,8 +864,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "show":
         return show(args.session)
     if args.command == "steps":
-        print(render_steps(max(1, args.limit)))
+        if args.json:
+            now = time.time()
+            print(json.dumps([step_view(s, now) for s in recent_steps(max(1, args.limit))], indent=2))
+        else:
+            print(render_steps(max(1, args.limit)))
         return 0
+    if args.command == "digest":
+        print(render_digest(max(1, args.limit), args.since, args.json))
+        return 0
+    if args.command == "tui":
+        return tui(max(1, args.limit))
     return statusline()
 
 

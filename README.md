@@ -65,6 +65,24 @@ ctx show <session-id-or-prefix>
 # Recent per-turn cost feed across all sessions (catches expensive turns):
 ctx steps
 ctx steps --limit 40
+ctx steps --json --limit 200    # machine-readable (feed to Claude to analyze)
+
+# Rollup summary: totals, top-cost turns, biggest cache writes, longest gaps:
+ctx digest --since 2h
+
+# Interactive browser (scroll/filter/drill into a turn):
+ctx tui
+```
+
+### Inside Claude Code
+
+Prefix any command with `!` in the Claude prompt to run it and drop the output
+into the conversation, or use the bundled `/ctx` slash command:
+
+```text
+!ctx digest --since 2h
+/ctx steps
+/ctx steps --json --limit 200   # then ask Claude to summarize the big turns
 
 # Offline "why did it burn?" audit:
 ctx audit --latest

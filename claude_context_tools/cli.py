@@ -11,7 +11,9 @@ USAGE = """ctx — Claude Code context & cache tools
 Usage:
   ctx dashboard [--refresh N] [--include-stale]   live multi-session monitor
   ctx show [SESSION]                              one session + audit command
-  ctx steps [--limit N]                           recent per-turn cost feed (all sessions)
+  ctx steps [--limit N] [--json]                  recent per-turn cost feed (all sessions)
+  ctx digest [--since 2h] [--json]                rollup: cost, cache writes, gaps
+  ctx tui [--limit N]                             interactive step browser
   ctx audit [--latest|--session ID|--transcript P] [--json]
                                                   offline "why did it burn?" analyzer
   ctx statusline                                  heartbeat statusline (reads stdin)
@@ -29,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cmd, rest = argv[0], argv[1:]
-    if cmd in ("dashboard", "show", "statusline", "steps"):
+    if cmd in ("dashboard", "show", "statusline", "steps", "digest", "tui"):
         return dashboard.main([cmd, *rest])
     if cmd == "audit":
         return audit.main(rest)

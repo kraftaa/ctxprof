@@ -170,6 +170,27 @@ class EndToEndCliTests(unittest.TestCase):
                          env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR), "COLUMNS": "160"})
         self.assertIn("Recent step costs", proc.stdout)
 
+    def test_steps_json_cli(self):
+        proc = self._run(["steps", "--json", "--limit", "5"],
+                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        rows = json.loads(proc.stdout)
+        self.assertTrue(rows and "cache_write" in rows[0] and "step" in rows[0])
+
+
+class DigestTests(unittest.TestCase):
+    def test_build_digest(self):
+        steps = audit.read_jsonl(STEPS)
+        views = [dashboard.step_view(s, 0.0) for s in steps]
+        d = dashboard.build_digest(views)
+        self.assertEqual(d["turns"], 4)
+        self.assertEqual(d["sessions"], 1)
+        self.assertTrue(d["biggest_cache_writes"], "fixture has large cache writes")
+
+    def test_parse_since(self):
+        self.assertEqual(dashboard.parse_since("2h"), 7200)
+        self.assertEqual(dashboard.parse_since("30m"), 1800)
+        self.assertIsNone(dashboard.parse_since(None))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
