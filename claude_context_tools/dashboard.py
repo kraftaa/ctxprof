@@ -44,13 +44,25 @@ def int_env(name: str, default: int) -> int:
 
 STALE_AFTER_SECONDS = int_env("CLAUDE_STATUS_STALE_AFTER_SECONDS", 900)
 
-RESET = "\033[0m"
-DIM = "\033[2m"
-TEAL = "\033[38;5;37m"
-GREEN = "\033[38;5;70m"
-YELLOW = "\033[38;5;178m"
-RED = "\033[38;5;203m"
-CYAN = "\033[38;5;38m"
+# Emit ANSI color only to a real terminal. When piped/captured (e.g. `!ctx ...`
+# inside Claude, or `ctx ... | less`), drop color so the output is clean text,
+# not escape-code soup. FORCE_COLOR overrides; NO_COLOR disables.
+_USE_COLOR = bool(os.environ.get("FORCE_COLOR")) or (
+    sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+)
+
+
+def _ansi(code: str) -> str:
+    return code if _USE_COLOR else ""
+
+
+RESET = _ansi("\033[0m")
+DIM = _ansi("\033[2m")
+TEAL = _ansi("\033[38;5;37m")
+GREEN = _ansi("\033[38;5;70m")
+YELLOW = _ansi("\033[38;5;178m")
+RED = _ansi("\033[38;5;203m")
+CYAN = _ansi("\033[38;5;38m")
 
 SPARK_BLOCKS = "▁▂▃▄▆█"
 SPARK_POINTS = 12
