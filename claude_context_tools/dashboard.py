@@ -598,6 +598,7 @@ def step_view(s: dict[str, Any], now: float) -> dict[str, Any]:
         "gap_s": number(s.get("delta_seen_seconds")),
         "lines_added": number(s.get("delta_lines_added")),
         "lines_removed": number(s.get("delta_lines_removed")),
+        "agent": s.get("agent") or "",
     }
 
 
@@ -775,22 +776,17 @@ def tui(limit: int) -> int:
     return 0
 
 
-def dashboard(refresh_seconds: float, include_stale: bool) -> int:
-    # Print once if a one-shot was requested, OR if stdout is not an interactive
-    # terminal (piped, captured, or run via a non-tty runner) — looping there
-    # can't clear the screen and would just spam frame after frame.
+def _live(render: "callable", refresh_seconds: float) -> int:
+    """Render `render()` once if not a TTY / one-shot, else live in the alt screen."""
     if refresh_seconds <= 0 or not sys.stdout.isatty():
-        print(render_table(include_stale=include_stale))
+        print(render())
         return 0
-
-    # Live mode in a real terminal: use the alternate screen buffer so each frame
-    # redraws in place and the user's scrollback is left untouched on exit.
     sys.stdout.write("\033[?1049h\033[?25l")  # enter alt screen, hide cursor
     sys.stdout.flush()
     try:
         while True:
             sys.stdout.write("\033[H\033[2J")  # home + clear
-            sys.stdout.write(render_table(include_stale=include_stale) + "\n")
+            sys.stdout.write(render() + "\n")
             sys.stdout.write(f"{DIM}(refresh {refresh_seconds:g}s — Ctrl-C to quit){RESET}\n")
             sys.stdout.flush()
             time.sleep(refresh_seconds)
@@ -799,6 +795,54 @@ def dashboard(refresh_seconds: float, include_stale: bool) -> int:
     finally:
         sys.stdout.write("\033[?25h\033[?1049l")  # show cursor, leave alt screen
         sys.stdout.flush()
+    return 0
+
+
+def dashboard(refresh_seconds: float, include_stale: bool) -> int:
+    return _live(lambda: render_table(include_stale=include_stale), refresh_seconds)
+
+
+def render_watch(session: str | None) -> str:
+    """Single-session live panel: context trend, cache rebuilds + cost, subagents, advice."""
+    now = time.time()
+    rec = find_record(session)
+    if not rec:
+        return f"{RED}No session found{RESET} (start one with the heartbeat statusline, or pass a session id)."
+    sid = str(rec.get("session_id"))
+    views = [v for v in (step_view(s, now) for s in recent_steps(3000)) if v["session_id"] == sid]
+    last_hour = [v for v in views if v["age_s"] <= 3600]
+    rebuilds = [v for v in last_hour if v["cache_write"] > 100000]
+    pricey = [v for v in last_hour if v["cost_usd"] >= 1.0]
+    rebuild_cost = sum(v["cost_usd"] for v in pricey)
+    hour_cost = sum(v["cost_usd"] for v in last_hour)
+    subagent = [v for v in last_hour if v.get("agent")]
+    ctxn = maybe_number(rec.get("context_pct")) or 0.0
+    ctx_color = RED if ctxn >= 80 else YELLOW if ctxn >= 60 else GREEN
+    seconds_since = now - number(rec.get("updated_at"))
+
+    lines = [
+        f"{TEAL}ctx watch{RESET}  {truncate(rec.get('session_name') or rec.get('repo') or sid, 54)}",
+        f"  repo {rec.get('repo') or '-'}   last seen {age(seconds_since)} ago",
+        f"  context {ctx_color}{fill_bar(ctxn / 100, 12)} {ctxn:.0f}%{RESET}   session cost ${number(rec.get('cost_usd')):.2f}",
+        f"  last hour: ${hour_cost:.2f}  {len(last_hour)} turns   rebuilds {len(rebuilds)} (≈${rebuild_cost:.2f})   subagent turns {len(subagent)}",
+        "",
+        f"{DIM}Recommendations:{RESET}",
+    ]
+    recs: list[str] = []
+    if ctxn >= 60:
+        recs.append(f"context {ctxn:.0f}% — `/clear` if switching tasks; a rebuild of this window costs ~${max(rebuild_cost, 2.0):.1f}")
+    if rebuilds:
+        recs.append(f"{len(rebuilds)} cache rebuild(s) this hour (≈${rebuild_cost:.2f}) — idle >5min is evicting cache; keep working or `/clear`, don't keep a big context warm-pinging past ~1.3h")
+    if seconds_since > 600 and ctxn >= 40:
+        recs.append(f"idle {age(seconds_since)} on a {ctxn:.0f}% context — next turn will likely pay a full re-cache")
+    if not recs:
+        recs.append("looks lean — nothing to do")
+    lines += [f"  • {r}" for r in recs]
+    return "\n".join(lines)
+
+
+def watch(session: str | None, refresh_seconds: float) -> int:
+    return _live(lambda: render_watch(session), refresh_seconds)
 
 
 def find_record(session: str | None) -> dict[str, Any] | None:
@@ -869,6 +913,9 @@ def main(argv: list[str] | None = None) -> int:
     digest_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     tui_parser = subparsers.add_parser("tui", help="interactive scrollable/filterable step browser")
     tui_parser.add_argument("--limit", type=int, default=500, help="number of recent turns to load")
+    watch_parser = subparsers.add_parser("watch", help="live single-session panel with cost recommendations")
+    watch_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest")
+    watch_parser.add_argument("--refresh", type=float, default=2.0, help="refresh interval in seconds; 0 prints once")
 
     args = parser.parse_args(argv)
     if args.command == "dashboard":
@@ -887,6 +934,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "tui":
         return tui(max(1, args.limit))
+    if args.command == "watch":
+        return watch(args.session, args.refresh)
     return statusline()
 
 
