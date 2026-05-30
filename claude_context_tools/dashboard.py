@@ -845,6 +845,43 @@ def watch(session: str | None, refresh_seconds: float) -> int:
     return _live(lambda: render_watch(session), refresh_seconds)
 
 
+def hook() -> int:
+    """Stop-hook: read the event JSON on stdin, emit one cost recommendation
+    (as a systemMessage) only when a threshold trips. Always fail-safe / exit 0."""
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        return 0
+    try:
+        sid = data.get("session_id")
+        rec = find_record(sid)
+        if not rec:
+            return 0
+        now = time.time()
+        ctxn = number(rec.get("context_pct"))
+        msgs: list[str] = []
+        if ctxn >= 60:
+            msgs.append(f"context {ctxn:.0f}% — consider /clear if switching tasks")
+        # last logged turn for this session
+        path = STATE_DIR / "steps" / f"{clean_session_id(str(sid))}.jsonl"
+        if path.exists():
+            tail = _tail_lines(path, 1)
+            if tail:
+                try:
+                    last = json.loads(tail[-1])
+                    cw = number(last.get("delta_cache_write_tokens"))
+                    cr = number(last.get("delta_cache_read_tokens"))
+                    if cw > 100000 and cr < cw * 0.2:
+                        msgs.append(f"last turn rebuilt {compact_int(cw)} cache (idle evicted it)")
+                except json.JSONDecodeError:
+                    pass
+        if msgs:
+            print(json.dumps({"systemMessage": "⚠ ctx: " + "; ".join(msgs)}))
+    except Exception:
+        return 0
+    return 0
+
+
 def find_record(session: str | None) -> dict[str, Any] | None:
     records = load_records(include_stale=True)
     if not records:
@@ -916,6 +953,7 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser = subparsers.add_parser("watch", help="live single-session panel with cost recommendations")
     watch_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest")
     watch_parser.add_argument("--refresh", type=float, default=2.0, help="refresh interval in seconds; 0 prints once")
+    subparsers.add_parser("hook", help="Stop-hook: emit a cost recommendation from the event on stdin")
 
     args = parser.parse_args(argv)
     if args.command == "dashboard":
@@ -936,6 +974,8 @@ def main(argv: list[str] | None = None) -> int:
         return tui(max(1, args.limit))
     if args.command == "watch":
         return watch(args.session, args.refresh)
+    if args.command == "hook":
+        return hook()
     return statusline()
 
 

@@ -322,6 +322,15 @@ if [ -n "$session_id" ]; then
     > "$status_dir/$session_file.tmp" 2>/dev/null && mv "$status_dir/$session_file.tmp" "$record_file" 2>/dev/null
 fi
 
+# ── Cost nudges ────────────────────────────────────────────────────────────
+# Warn when the window is filling, and flag a just-happened full cache rebuild.
+if [ -n "$used_pct" ] && awk -v v="$used_pct" 'BEGIN{exit !(v+0>=60)}'; then
+  parts="${parts} $(printf '\033[0;31m⚠ctx /clear?\033[0m')"
+fi
+if [ -n "${delta_cache_write:-}" ] && awk -v w="${delta_cache_write:-0}" -v r="${delta_cache_read:-0}" 'BEGIN{exit !(w+0>50000 && r+0 < (w+0)*0.2)}'; then
+  parts="${parts} $(printf '\033[0;33m⟳rebuilt %s\033[0m' "$(compact "${delta_cache_write:-0}")")"
+fi
+
 printf "%s\n" "$parts"
 
 if [ -n "$step_file" ] && [ -f "$step_file" ]; then

@@ -176,6 +176,22 @@ class EndToEndCliTests(unittest.TestCase):
         rows = json.loads(proc.stdout)
         self.assertTrue(rows and "cache_write" in rows[0] and "step" in rows[0])
 
+    def test_hook_is_failsafe(self):
+        # Garbage stdin and unknown sessions must never crash or emit noise.
+        env = dict(os.environ, PYTHONPATH=str(PKG_ROOT), CLAUDE_STATUS_STATE_DIR=str(STATE_DIR))
+        for stdin in ("not json", '{"session_id":"nope"}'):
+            proc = subprocess.run(
+                [sys.executable, "-m", "claude_context_tools.cli", "hook"],
+                input=stdin, capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_watch_cli(self):
+        proc = self._run(["watch", SESSION, "--refresh", "0"],
+                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        self.assertIn("ctx watch", proc.stdout)
+
 
 class DigestTests(unittest.TestCase):
     def test_build_digest(self):

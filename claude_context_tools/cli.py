@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cmd, rest = argv[0], argv[1:]
-    if cmd in ("dashboard", "show", "statusline", "steps", "digest", "tui", "watch"):
+    if cmd in ("dashboard", "show", "statusline", "steps", "digest", "tui", "watch", "hook"):
         return dashboard.main([cmd, *rest])
     if cmd == "audit":
         return audit.main(rest)
