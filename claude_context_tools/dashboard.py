@@ -621,15 +621,38 @@ def build_digest(views: list[dict[str, Any]]) -> dict[str, Any]:
         agg["cost_usd"] += v["cost_usd"]
         agg["tokens"] += v["tokens"]
     top = lambda key, n=8: sorted(views, key=lambda v: v[key], reverse=True)[:n]
+    sessions_by_cost = sorted(by_session.values(), key=lambda a: a["cost_usd"], reverse=True)
+    total_cost = sum(v["cost_usd"] for v in views)
+
+    # Derive concrete advice from the rollup.
+    pricey = [v for v in views if v["cost_usd"] >= 1.0]
+    rebuild_spend = round(sum(v["cost_usd"] for v in pricey), 2)
+    big_writes = [v for v in views if v["cache_write"] > 200000]
+    recs: list[str] = []
+    if sessions_by_cost and total_cost > 0:
+        t = sessions_by_cost[0]
+        share = t["cost_usd"] / total_cost * 100
+        if share >= 40 and len(sessions_by_cost) > 1:
+            name = t["repo"] or t["label"] or t["session_id"]
+            recs.append(f"{name} is ${t['cost_usd']:.0f} of ${total_cost:.0f} ({share:.0f}%) — your biggest sink; /clear it if that task is done.")
+    if pricey:
+        recs.append(f"{len(pricey)} turn(s) cost ≥$1 (≈${rebuild_spend:.0f}) — these are full cache rebuilds, almost all after idle. Don't leave a big-context session idle >~1.3h; /clear before long breaks.")
+    if big_writes:
+        recs.append(f"{len(big_writes)} turn(s) rewrote >200k tokens of cache (read 0) — a large window being re-cached; smaller or cleared sessions avoid this.")
+    if not recs:
+        recs.append("No expensive rebuilds in this window — looks lean.")
+
     return {
         "turns": len(views),
         "sessions": len(by_session),
-        "total_cost_usd": round(sum(v["cost_usd"] for v in views), 4),
+        "total_cost_usd": round(total_cost, 4),
         "total_tokens": sum(v["tokens"] for v in views),
+        "rebuild_spend_usd": rebuild_spend,
         "top_cost_turns": top("cost_usd"),
         "biggest_cache_writes": [v for v in top("cache_write") if v["cache_write"] > 0],
         "longest_gaps": top("gap_s"),
-        "by_session": sorted(by_session.values(), key=lambda a: a["cost_usd"], reverse=True),
+        "by_session": sessions_by_cost,
+        "recommendations": recs,
     }
 
 
@@ -665,6 +688,9 @@ def render_digest(limit: int, since: str | None, as_json: bool) -> str:
     lines.append(f"\n{DIM}Longest idle gaps before a turn:{RESET}")
     for v in digest["longest_gaps"]:
         lines.append(f"  {age(v['gap_s']):>6}  step {v['step']:>5}  {truncate(v['repo'] or '-', 20)}")
+    lines.append(f"\n{DIM}Recommendations:{RESET}")
+    for r in digest["recommendations"]:
+        lines.append(f"  • {r}")
     return "\n".join(lines)
 
 
