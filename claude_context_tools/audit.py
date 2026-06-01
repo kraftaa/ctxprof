@@ -46,8 +46,25 @@ def pct(part: float, whole: float) -> str:
     return f"{(part / whole) * 100:.0f}%"
 
 
+# chars/token multiplier. ~4 chars/token baseline, scaled by the model's
+# tokenizer: Opus 4.7+ uses a newer tokenizer (~+35% tokens for the same text).
+# main() sets this from the audited session's model; --token-factor overrides.
+TOKENIZER_FACTOR = 1.0
+
+
+def tokenizer_factor(model: str | None) -> float:
+    """~1.35 for Opus 4.7 and later (new tokenizer), else 1.0."""
+    s = (model or "").lower()
+    if "opus" not in s:
+        return 1.0
+    match = re.search(r"(\d+)\.(\d+)", s)
+    if not match:
+        return 1.0
+    return 1.35 if (int(match.group(1)), int(match.group(2))) >= (4, 7) else 1.0
+
+
 def est_tokens(chars: int) -> int:
-    return max(1, round(chars / 4)) if chars else 0
+    return max(1, round(chars / 4 * TOKENIZER_FACTOR)) if chars else 0
 
 
 def shorten(value: Any, width: int = 96) -> str:
@@ -426,7 +443,8 @@ def print_report(transcript: Path, analysis: dict[str, Any], limit: int) -> None
     print("Claude Context Audit")
     print(f"Transcript: {transcript}")
     print(f"Repo: {repo}  Session: {session_id}")
-    print(f"Transcript payload estimate: ~{compact_int(total_est)} tokens from {compact_int(total_chars)} chars")
+    factor_note = f" (~{4 / TOKENIZER_FACTOR:.1f} chars/tok, ×{TOKENIZER_FACTOR:g} for this model's tokenizer)" if TOKENIZER_FACTOR != 1.0 else " (~4 chars/tok, rough)"
+    print(f"Transcript payload estimate: ~{compact_int(total_est)} tokens from {compact_int(total_chars)} chars{factor_note}")
     if status:
         print(
             "Live/session totals: "
@@ -579,6 +597,7 @@ def build_payload(transcript: Path, analysis: dict[str, Any], limit: int) -> dic
         "session_id": status.get("session_id"),
         "transcript_payload_est_tokens": est_tokens(total_chars),
         "transcript_payload_chars": total_chars,
+        "tokenizer_factor": TOKENIZER_FACTOR,
         "session_totals": {
             "context_pct": status.get("context_pct") if status else None,
             "total_tokens": status.get("total_tokens") if status else None,
@@ -641,6 +660,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-dir", default=str(DEFAULT_STATE_DIR), help="directory containing session-status JSON files")
     parser.add_argument("--limit", type=int, default=8, help="number of rows per section")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of the text report")
+    parser.add_argument("--token-factor", type=float, default=None, help="chars/token multiplier (default: auto from model; ~1.35 for Opus 4.7+)")
     args = parser.parse_args(argv)
 
     state_dir = Path(args.state_dir).expanduser()
@@ -654,6 +674,12 @@ def main(argv: list[str] | None = None) -> int:
     transcript, status = resolve_target(selector, state_dir)
     if not transcript.exists():
         raise SystemExit(f"transcript does not exist: {transcript}")
+
+    # Scale char->token estimates to the audited model's tokenizer.
+    global TOKENIZER_FACTOR
+    TOKENIZER_FACTOR = args.token_factor if args.token_factor else tokenizer_factor(
+        (status or {}).get("model") if status else None
+    )
 
     rows = read_jsonl(transcript)
     steps = load_steps(status, state_dir)

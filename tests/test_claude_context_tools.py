@@ -41,6 +41,13 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(audit.est_tokens(4), 1)
         self.assertEqual(audit.est_tokens(400), 100)
 
+    def test_tokenizer_factor(self):
+        self.assertEqual(audit.tokenizer_factor("Opus 4.8 (1M context)"), 1.35)
+        self.assertEqual(audit.tokenizer_factor("Opus 4.7"), 1.35)
+        self.assertEqual(audit.tokenizer_factor("Opus 4.5"), 1.0)
+        self.assertEqual(audit.tokenizer_factor("Sonnet 4.6"), 1.0)
+        self.assertEqual(audit.tokenizer_factor(None), 1.0)
+
     def test_duration_and_age(self):
         self.assertEqual(dashboard.duration(0), "0m")
         self.assertEqual(dashboard.duration(3_600_000), "1h00m")
