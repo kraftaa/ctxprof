@@ -142,14 +142,20 @@ def resolve_target(target: str | None, state_dir: Path) -> tuple[Path, dict[str,
         return raw, find_status_for_transcript(raw, state_dir)
 
     if raw.exists() and raw.suffix == ".json":
-        status = json.loads(raw.read_text(encoding="utf-8"))
+        try:
+            status = json.loads(raw.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"could not read status JSON {raw}: {exc}")
         if not status.get("transcript_path"):
             raise SystemExit(f"status file has no transcript_path: {raw}")
         return Path(status["transcript_path"]).expanduser(), status
 
     status_path = state_dir / f"{target}.json"
     if status_path.exists():
-        status = json.loads(status_path.read_text(encoding="utf-8"))
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"could not read status JSON {status_path}: {exc}")
         if not status.get("transcript_path"):
             raise SystemExit(f"status file has no transcript_path: {status_path}")
         return Path(status["transcript_path"]).expanduser(), status

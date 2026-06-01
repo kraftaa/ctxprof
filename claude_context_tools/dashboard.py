@@ -93,8 +93,9 @@ def _tail_lines(path: Path, n: int) -> list[str]:
 def sparkline(session_id: str, points: int = SPARK_POINTS) -> str:
     """Recent per-turn token bars, colored by cache share (green=cached, cyan=fresh).
 
-    Mirrors the heartbeat statusline's sparkline so the dashboard shows the same
-    at-a-glance activity per session. Returns "" when no step data exists.
+    Bars are sized by total token volume and colored by cache-read share
+    (green = cheap cache hits, cyan = fresh input / rebuild). Returns "" when no
+    step data exists.
     """
     path = STATE_DIR / "steps" / f"{session_id}.jsonl"
     if not path.exists():
@@ -111,11 +112,15 @@ def sparkline(session_id: str, points: int = SPARK_POINTS) -> str:
             continue
         inp = number(step.get("delta_input_tokens"))
         out = number(step.get("delta_output_tokens"))
-        cache = number(step.get("delta_cache_read_tokens")) + number(step.get("delta_cache_write_tokens"))
-        fresh = max(0.0, inp - cache)
-        total = fresh + out + cache
+        cr = number(step.get("delta_cache_read_tokens"))
+        cw = number(step.get("delta_cache_write_tokens"))
+        # input_tokens already includes cache reads (not writes). Color by the
+        # *cheap* share = cache reads / all token activity, so a big-write rebuild
+        # turn shows as expensive (cyan), not green.
+        fresh = max(0.0, inp - cr)
+        total = cr + fresh + out + cw
         totals.append(total)
-        shares.append(cache / total if total > 0 else 0.0)
+        shares.append(cr / total if total > 0 else 0.0)
     if not totals:
         return ""
     peak = max(totals) or 1.0
@@ -492,7 +497,7 @@ def render_table(include_stale: bool = False) -> str:
             notes.append(f"{hidden} idle >{age(STALE_AFTER_SECONDS)} hidden (use --include-stale).")
         lines.append(f"{DIM}{'  '.join(notes)}{RESET}")
         if "recent" in shown_keys:
-            lines.append(f"{DIM}RECENT = last {SPARK_POINTS} turns' token volume; {GREEN}green{DIM}=cached {CYAN}cyan{DIM}=fresh.{RESET}")
+            lines.append(f"{DIM}RECENT = last {SPARK_POINTS} turns' token volume; {GREEN}green{DIM}=cache hits (cheap) {CYAN}cyan{DIM}=fresh/rebuild (paid).{RESET}")
         lines.append(f"{DIM}Inspect one: ctx show <session-id>{RESET}")
 
     return "\n".join(lines)
@@ -566,16 +571,17 @@ def render_steps(limit: int) -> str:
 
 
 def parse_since(value: str | None) -> float | None:
-    """Parse a duration like '90s', '30m', '2h', '1d' into seconds. None if empty."""
-    if not value:
+    """Parse a duration like '90s', '30m', '2h', '1d' into seconds. None if empty/invalid."""
+    if not value or not value.strip():
         return None
     value = value.strip().lower()
     units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     mult = units.get(value[-1])
     try:
-        return float(value[:-1]) * mult if mult else float(value)
+        seconds = float(value[:-1]) * mult if mult else float(value)
     except (ValueError, TypeError):
         return None
+    return seconds if seconds > 0 else None
 
 
 def step_view(s: dict[str, Any], now: float) -> dict[str, Any]:
@@ -626,8 +632,9 @@ def build_digest(views: list[dict[str, Any]]) -> dict[str, Any]:
 
     # Derive concrete advice from the rollup.
     pricey = [v for v in views if v["cost_usd"] >= 1.0]
-    rebuild_spend = round(sum(v["cost_usd"] for v in pricey), 2)
-    big_writes = [v for v in views if v["cache_write"] > 200000]
+    pricey_spend = round(sum(v["cost_usd"] for v in pricey), 2)
+    # full re-caches: large write with little/no read (the expensive idle-rebuild pattern)
+    rebuilds = [v for v in views if v["cache_write"] > 200000 and v["cache_read"] < v["cache_write"] * 0.1]
     recs: list[str] = []
     if sessions_by_cost and total_cost > 0:
         t = sessions_by_cost[0]
@@ -636,9 +643,9 @@ def build_digest(views: list[dict[str, Any]]) -> dict[str, Any]:
             name = t["repo"] or t["label"] or t["session_id"]
             recs.append(f"{name} is ${t['cost_usd']:.0f} of ${total_cost:.0f} ({share:.0f}%) — your biggest sink; /clear it if that task is done.")
     if pricey:
-        recs.append(f"{len(pricey)} turn(s) cost ≥$1 (≈${rebuild_spend:.0f}) — these are full cache rebuilds, almost all after idle. Don't leave a big-context session idle >~1.3h; /clear before long breaks.")
-    if big_writes:
-        recs.append(f"{len(big_writes)} turn(s) rewrote >200k tokens of cache (read 0) — a large window being re-cached; smaller or cleared sessions avoid this.")
+        recs.append(f"{len(pricey)} high-cost turn(s) ≥$1 (≈${pricey_spend:.0f}) — often full cache rebuilds after idle. Don't leave a big-context session idle >~1.3h; /clear before long breaks.")
+    if rebuilds:
+        recs.append(f"{len(rebuilds)} turn(s) rewrote >200k cache tokens with little/no read — a large window re-cached after eviction; smaller or cleared sessions avoid this.")
     if not recs:
         recs.append("No expensive rebuilds in this window — looks lean.")
 
@@ -647,7 +654,7 @@ def build_digest(views: list[dict[str, Any]]) -> dict[str, Any]:
         "sessions": len(by_session),
         "total_cost_usd": round(total_cost, 4),
         "total_tokens": sum(v["tokens"] for v in views),
-        "rebuild_spend_usd": rebuild_spend,
+        "high_cost_spend_usd": pricey_spend,
         "top_cost_turns": top("cost_usd"),
         "biggest_cache_writes": [v for v in top("cache_write") if v["cache_write"] > 0],
         "longest_gaps": top("gap_s"),
@@ -720,7 +727,7 @@ def tui(limit: int) -> int:
                      or filt.lower() in str(v.get("label") or "").lower()]
             sel = max(0, min(sel, len(views) - 1)) if views else 0
             h, w = stdscr.getmaxyx()
-            body = h - 4
+            body = max(0, h - 4)
             if sel < top:
                 top = sel
             elif sel >= top + body:
@@ -733,9 +740,10 @@ def tui(limit: int) -> int:
             for idx in range(top, min(len(views), top + body)):
                 v = views[idx]
                 c = v["cost_usd"]
+                cache_cell = f"{compact_int(v['cache_read'])}/{compact_int(v['cache_write'])}"
                 line = (f" {age(now - v['timestamp']):>5}  {v['step']:>5}  {truncate(v['repo'] or '-', 18):<18}  "
                         f"{v['context_pct']:>3.0f}%  {compact_int(v['tokens']):>7}  "
-                        f"{compact_int(v['cache_read'])}/{compact_int(v['cache_write']):>11}  "
+                        f"{cache_cell:>11}  "
                         f"${c:>7.4f}  {age(v['gap_s']):>6}  {truncate(v['label'] or '-', max(4, w - 70))}")
                 attr = curses.A_REVERSE if idx == sel else 0
                 if c >= 1.0:

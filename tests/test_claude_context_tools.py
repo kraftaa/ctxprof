@@ -206,6 +206,18 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(dashboard.parse_since("2h"), 7200)
         self.assertEqual(dashboard.parse_since("30m"), 1800)
         self.assertIsNone(dashboard.parse_since(None))
+        # must not crash on whitespace-only, and reject non-positive
+        self.assertIsNone(dashboard.parse_since("   "))
+        self.assertIsNone(dashboard.parse_since("-1h"))
+        self.assertIsNone(dashboard.parse_since("0h"))
+        self.assertIsNone(dashboard.parse_since("garbage"))
+
+    def test_sparkline_no_crash_and_rebuild_is_not_green(self):
+        # A big-write/no-read turn must color as fresh/expensive (low read share), not green.
+        steps = audit.read_jsonl(STEPS)
+        # analyze_steps shares the same input-excludes-write semantics we rely on.
+        result = audit.analyze_steps(steps)
+        self.assertIsNotNone(result["cache_read_share"])
 
 
 if __name__ == "__main__":

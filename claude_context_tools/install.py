@@ -68,7 +68,10 @@ def wire_statusline(settings_path: Path, force: bool) -> int:
         print(f"backed up existing settings to {backup}")
 
     settings["statusLine"] = desired
-    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    # Atomic write so a crash mid-write can't truncate settings.json.
+    tmp = settings_path.with_suffix(settings_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(settings_path)
     print(f"statusLine set to the heartbeat in {settings_path}.")
     print("Restart Claude Code to pick it up.")
     return 0
