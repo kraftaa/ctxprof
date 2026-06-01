@@ -1,14 +1,17 @@
 # claude-context-tools
 
-Two small, dependency-free tools for understanding where a Claude Code session's
-context and cache budget actually goes:
+A small, dependency-free CLI (`ctx`) for understanding where a Claude Code
+session's context and cache budget actually goes — three lenses:
 
-- **Dashboard** — a live "how much" monitor across all your open sessions.
-- **Audit** — an offline "why did context/cache burn?" analyzer for one session.
+- **Live** — `ctx dashboard` (all sessions) / `ctx watch` (one session): how much,
+  right now.
+- **Per-turn** — `ctx steps` / `ctx digest` / `ctx rates`: what each turn cost and
+  where the money went.
+- **Offline** — `ctx audit`: why one session burned context/cache, after the fact.
 
-Both read the same per-session **heartbeat** files that a statusline writes. The
-statusline is the only piece that runs inside Claude Code; the dashboard and
-audit are ordinary commands you run in any terminal.
+All read the same per-session **heartbeat** files that a statusline writes. The
+statusline is the only piece that runs inside Claude Code; everything else is an
+ordinary command you run in any terminal (or via `!ctx …` / `/ctx` inside Claude).
 
 ```text
 Claude Code session
@@ -40,8 +43,9 @@ pip install -e claude-context-tools
 ```
 
 This installs one command, `ctx`, an umbrella with subcommands:
-`dashboard`, `show`, `audit`, `statusline`, `install`. Run `ctx` with no
-arguments to see them all.
+`dashboard`, `watch`, `show`, `steps`, `digest`, `rates`, `audit`, `tui`,
+`install` (plus `statusline`/`hook` plumbing). Run `ctx` with no arguments to
+see them all.
 
 No clone needed after install. To run without installing, use
 `python3 -m claude_context_tools.cli <subcommand>` from this directory.
@@ -62,6 +66,10 @@ ctx dashboard --include-stale
 ctx show
 ctx show <session-id-or-prefix>
 
+# Live single-session panel + recommendations (the "sidebar"; run in a split pane):
+ctx watch
+ctx watch <session-id>
+
 # Recent per-turn cost feed across all sessions (catches expensive turns):
 ctx steps
 ctx steps --limit 40
@@ -73,6 +81,7 @@ ctx digest --since 2h
 # Price table + keep-warm-vs-rebuild economics for the current context:
 ctx rates
 ctx rates --context 100000 --model "Opus 4.8"
+# (edit prices without touching code via ~/.claude/ctx-pricing.json)
 
 # Interactive browser (scroll/filter/drill into a turn):
 ctx tui
@@ -144,8 +153,10 @@ and these tools will read it. To wire it by hand instead:
 
 ### Honest limits
 
-- Token counts are **estimates** (`~4 chars/token` for transcript content);
-  session-level numbers come from Claude Code's own usage fields.
+- Token counts in `ctx audit` are **estimates** (`~4 chars/token`, scaled by the
+  model's tokenizer — ×1.35 for Opus 4.7+; override with `--token-factor`). The
+  live per-turn numbers (statusline, `ctx steps`, COST) are Claude Code's own
+  exact usage fields, not estimates.
 - Cache analysis is **heuristic and token-level** — the heartbeat exposes per-turn
   token *counts*, not cache-block boundaries, so it flags *likely* invalidation,
   not exact cache-block attribution.
@@ -158,8 +169,9 @@ and these tools will read it. To wire it by hand instead:
   sessions by what they're doing, not by UUID. **ID** is a short id prefix
   (enough for `ctx show <prefix>`).
 - **CONTEXT** is a fill bar + percent; **RECENT** is a per-session sparkline of
-  the last few turns' token volume, colored by cache share (green = cached,
-  cyan = fresh) — the same signal as the heartbeat statusline's bar.
+  the last few turns' token volume, colored by cache-**read** share
+  (green = cheap cache hits, cyan = fresh input / rebuild) so big-write rebuild
+  turns show as expensive, not green.
 - The table is **responsive**: on narrow terminals lower-priority columns
   (MODE, AGENT, 5H/7D, IN/OUT, API, DUR, CHG) drop out, always keeping REPO,
   the CONTEXT bar, COST, RECENT and LABEL.
