@@ -70,6 +70,10 @@ ctx steps --json --limit 200    # machine-readable (feed to Claude to analyze)
 # Rollup summary: totals, top-cost turns, biggest cache writes, longest gaps:
 ctx digest --since 2h
 
+# Price table + keep-warm-vs-rebuild economics for the current context:
+ctx rates
+ctx rates --context 100000 --model "Opus 4.8"
+
 # Interactive browser (scroll/filter/drill into a turn):
 ctx tui
 ```

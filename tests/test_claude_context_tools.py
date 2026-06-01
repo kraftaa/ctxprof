@@ -20,7 +20,7 @@ from pathlib import Path
 PKG_ROOT = Path(__file__).resolve().parents[1]  # the claude-context-tools dir
 sys.path.insert(0, str(PKG_ROOT))
 
-from claude_context_tools import audit, dashboard  # noqa: E402
+from claude_context_tools import audit, dashboard, pricing  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SESSION = "00000000-aaaa-bbbb-cccc-000000000001"
@@ -191,6 +191,20 @@ class EndToEndCliTests(unittest.TestCase):
         proc = self._run(["watch", SESSION, "--refresh", "0"],
                          env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
         self.assertIn("ctx watch", proc.stdout)
+
+
+class PricingTests(unittest.TestCase):
+    def test_match_model(self):
+        self.assertEqual(pricing.match_model("Opus 4.8 (1M context)"), "opus-4.8")
+        self.assertEqual(pricing.match_model("Sonnet 4.6"), "sonnet-4.6")
+        self.assertTrue(pricing.match_model("Opus 9.9").startswith("opus-"))  # unknown -> family fallback
+        self.assertEqual(pricing.match_model(""), pricing.DEFAULT_MODEL)
+
+    def test_economics_breakeven_is_size_independent(self):
+        a = pricing.cache_economics(100_000, "opus-4.8")
+        b = pricing.cache_economics(564_000, "opus-4.8")
+        self.assertAlmostEqual(b["rebuild_cost"], 564_000 * 6.25 / 1_000_000, places=4)
+        self.assertAlmostEqual(a["breakeven_hours"], b["breakeven_hours"], places=6)
 
 
 class DigestTests(unittest.TestCase):

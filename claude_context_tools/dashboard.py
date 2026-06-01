@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import pricing
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -879,6 +881,46 @@ def watch(session: str | None, refresh_seconds: float) -> int:
     return _live(lambda: render_watch(session), refresh_seconds)
 
 
+def render_rates(context: float | None, model: str | None, interval: float) -> str:
+    """Show the model price table + keep-warm vs rebuild economics for a context."""
+    table = pricing.load_pricing()
+    rec = find_record(None)
+    model_name = model or (rec.get("model") if rec else None)
+    key = pricing.match_model(model_name, table)
+    if context is None:
+        context = number(rec.get("input_tokens")) if rec else 0.0
+
+    src = "platform.claude.com pricing"
+    override = pricing.OVERRIDE_PATH
+    src += f"; override: {override}" if override.exists() else f"; override (none): {override}"
+    lines = [
+        f"{TEAL}ctx rates{RESET}  ($/MTok — {src})",
+        "",
+        f"{DIM}{'model':<11} {'input':>6} {'output':>7} {'cache_rd':>9} {'wr_5m':>7} {'wr_1h':>7}{RESET}",
+    ]
+    for k in sorted(table):
+        r = table[k]
+        mark = f"  {GREEN}<- current{RESET}" if k == key else ""
+        lines.append(f"{k:<11} {r.get('input', 0):>6.2f} {r.get('output', 0):>7.2f} "
+                     f"{r.get('cache_read', 0):>9.2f} {r.get('cache_write_5m', 0):>7.2f} "
+                     f"{r.get('cache_write_1h', 0):>7.2f}{mark}")
+    lines.append(f"{DIM}matched model: {model_name or '-'}  ->  {key}{RESET}")
+
+    if context and context > 0:
+        e = pricing.cache_economics(context, key, table, ping_interval_s=interval)
+        lines += [
+            "",
+            f"{DIM}Keep-warm vs rebuild for {compact_int(context)} context tokens "
+            f"(5m cache, {interval:g}s pings):{RESET}",
+            f"  one cache read (warm turn):  ${e['ping_cost']:.4f}",
+            f"  keep warm:                   ${e['warm_per_hour']:.2f}/hr  ({e['pings_per_hour']:.0f} pings/hr)",
+            f"  one full rebuild:            ${e['rebuild_cost']:.4f}",
+            f"  break-even idle:             {e['breakeven_hours'] * 60:.0f} min  "
+            f"(idle longer → let it expire / clear)",
+        ]
+    return "\n".join(lines)
+
+
 def hook() -> int:
     """Stop-hook: read the event JSON on stdin, emit one cost recommendation
     (as a systemMessage) only when a threshold trips. Always fail-safe / exit 0."""
@@ -988,6 +1030,10 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest")
     watch_parser.add_argument("--refresh", type=float, default=2.0, help="refresh interval in seconds; 0 prints once")
     subparsers.add_parser("hook", help="Stop-hook: emit a cost recommendation from the event on stdin")
+    rates_parser = subparsers.add_parser("rates", help="model price table + keep-warm vs rebuild economics")
+    rates_parser.add_argument("--context", type=float, help="context tokens (default: current session size)")
+    rates_parser.add_argument("--model", help="model name (default: current session model)")
+    rates_parser.add_argument("--interval", type=float, default=240, help="keep-alive ping interval seconds")
 
     args = parser.parse_args(argv)
     if args.command == "dashboard":
@@ -1010,6 +1056,9 @@ def main(argv: list[str] | None = None) -> int:
         return watch(args.session, args.refresh)
     if args.command == "hook":
         return hook()
+    if args.command == "rates":
+        print(render_rates(args.context, args.model, args.interval))
+        return 0
     return statusline()
 
 
