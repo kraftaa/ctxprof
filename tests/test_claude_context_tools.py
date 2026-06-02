@@ -199,6 +199,10 @@ class EndToEndCliTests(unittest.TestCase):
                          env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
         self.assertIn("ctx watch", proc.stdout)
 
+    def test_explain_cli(self):
+        proc = self._run(["explain", SESSION], env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        self.assertIn("ctx explain", proc.stdout)
+
 
 class PricingTests(unittest.TestCase):
     def test_match_model(self):

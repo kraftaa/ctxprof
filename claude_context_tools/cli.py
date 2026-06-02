@@ -12,6 +12,7 @@ Usage:
   ctx dashboard [--refresh N] [--include-stale]   live multi-session monitor
   ctx show [SESSION]                              one session + audit command
   ctx watch [SESSION]                             live single-session panel + advice
+  ctx explain [SESSION]                           root-cause why a session got expensive
   ctx steps [--limit N] [--json]                  recent per-turn cost feed (all sessions)
   ctx digest [--since 2h] [--json]                rollup: cost, cache writes, gaps
   ctx rates [--context N] [--model M]             price table + keep-warm vs rebuild math
@@ -33,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cmd, rest = argv[0], argv[1:]
-    if cmd in ("dashboard", "show", "statusline", "steps", "digest", "tui", "watch", "hook", "rates"):
+    if cmd in ("dashboard", "show", "statusline", "steps", "digest", "tui", "watch", "hook", "rates", "explain"):
         return dashboard.main([cmd, *rest])
     if cmd == "audit":
         return audit.main(rest)

@@ -8,6 +8,8 @@ session's context and cache budget actually goes — three lenses:
 - **Per-turn** — `ctx steps` / `ctx digest` / `ctx rates`: what each turn cost and
   where the money went.
 - **Offline** — `ctx audit`: why one session burned context/cache, after the fact.
+- **Explain** — `ctx explain`: the *story* of a cost spike — spike → cause
+  (idle eviction or a big insert) → cache collapse → rebuild cost → fix.
 
 All read the same per-session **heartbeat** files that a statusline writes. The
 statusline is the only piece that runs inside Claude Code; everything else is an
@@ -43,9 +45,9 @@ pip install -e claude-context-tools
 ```
 
 This installs one command, `ctx`, an umbrella with subcommands:
-`dashboard`, `watch`, `show`, `steps`, `digest`, `rates`, `audit`, `tui`,
-`install` (plus `statusline`/`hook` plumbing). Run `ctx` with no arguments to
-see them all.
+`dashboard`, `watch`, `explain`, `show`, `steps`, `digest`, `rates`, `audit`,
+`tui`, `install` (plus `statusline`/`hook` plumbing). Run `ctx` with no
+arguments to see them all.
 
 No clone needed after install. To run without installing, use
 `python3 -m claude_context_tools.cli <subcommand>` from this directory.
@@ -69,6 +71,10 @@ ctx show <session-id-or-prefix>
 # Live single-session panel + recommendations (the "sidebar"; run in a split pane):
 ctx watch
 ctx watch <session-id>
+
+# Root-cause why a session got expensive (spike -> cause -> rebuild cost -> fix):
+ctx explain
+ctx explain <session-id>
 
 # Recent per-turn cost feed across all sessions (catches expensive turns):
 ctx steps

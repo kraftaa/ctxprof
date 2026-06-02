@@ -881,6 +881,102 @@ def watch(session: str | None, refresh_seconds: float) -> int:
     return _live(lambda: render_watch(session), refresh_seconds)
 
 
+def _transcript_trigger(transcript_path: str, spike_ts: float, window_s: float = 240) -> tuple[int, str] | None:
+    """Best-effort: the largest content block added just before spike_ts.
+
+    Returns (chars, label) or None. Correlates the heartbeat step's epoch
+    timestamp with the transcript rows' ISO timestamps.
+    """
+    import datetime
+
+    from . import audit
+    path = Path(transcript_path).expanduser()
+    if not path.exists():
+        return None
+    best: tuple[int, str] | None = None
+    for row in audit.read_jsonl(path):
+        ts = row.get("timestamp")
+        try:
+            epoch = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+        if not (spike_ts - window_s <= epoch <= spike_ts + 10):
+            continue
+        message = row.get("message") if isinstance(row.get("message"), dict) else {}
+        content = message.get("content")
+        label = "content"
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    label = "a tool result"
+                    break
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    label = f"a {block.get('name', 'tool')} call"
+        elif str(message.get("role")) == "user":
+            label = "a user message/paste"
+        size = len(audit.content_text(content))
+        if size and (best is None or size > best[0]):
+            best = (size, label)
+    return best
+
+
+def render_explain(session: str | None) -> str:
+    """Narrate why a session got expensive: spike -> cache collapse -> rebuild -> cost."""
+    now = time.time()
+    rec = find_record(session)
+    if not rec:
+        return f"{RED}No session found.{RESET}"
+    sid = str(rec.get("session_id"))
+    views = sorted(
+        (v for v in (step_view(s, now) for s in recent_steps(5000)) if v["session_id"] == sid),
+        key=lambda v: v["step"],
+    )
+    if not views:
+        return "No step data for this session yet (needs steps/<session>.jsonl)."
+
+    spike = max(views, key=lambda v: v["cost_usd"])
+    if spike["cost_usd"] < 0.25:
+        return (f"{TEAL}ctx explain{RESET}  {truncate(rec.get('session_name') or sid, 50)}\n"
+                f"  No expensive spike found — most-costly turn was step {spike['step']} at "
+                f"${spike['cost_usd']:.4f}. This session looks lean.")
+
+    idx = views.index(spike)
+    window = views[max(0, idx - 1): idx + 1]  # the rebuild write usually sits one turn before the cost
+    warm_read = max((v["cache_read"] for v in views[max(0, idx - 5):idx]), default=0.0)
+    write = max((v["cache_write"] for v in window), default=0.0)
+    gap = max((v["gap_s"] for v in window), default=0.0)
+    # cost impact: the spike plus adjacent >=$0.25 turns
+    impact_turns = [v for v in views[max(0, idx - 1): idx + 4] if v["cost_usd"] >= 0.25]
+    impact = sum(v["cost_usd"] for v in impact_turns)
+
+    idle = gap > 300
+    cause = (f"idle ~{age(gap)} (> the ~5-min cache TTL) → the cached prefix expired"
+             if idle else "the cached prefix was invalidated (a large block was added, or a /compact)")
+
+    lines = [
+        f"{TEAL}ctx explain{RESET}  {truncate(rec.get('session_name') or rec.get('repo') or sid, 54)}",
+        "",
+        f"Got expensive at step {spike['step']} (ctx {spike['context_pct']:.0f}%): "
+        f"{RED}+${spike['cost_usd']:.4f}{RESET} that turn.",
+        f"  Cause: {cause}.",
+        f"  Cache: reads {compact_int(warm_read)} → {compact_int(spike['cache_read'])}, "
+        f"rebuild write {compact_int(write)}.",
+    ]
+    trigger = _transcript_trigger(rec.get("transcript_path") or "", spike["timestamp"])
+    if trigger and not idle:
+        size, label = trigger
+        from . import audit as _audit
+        lines.append(f"  Likely trigger: {label} of ~{compact_int(_audit.est_tokens(size))} tok added just before.")
+    lines.append(f"  Impact: {RED}+${impact:.2f}{RESET} across {len(impact_turns)} turn(s) (rebuild + settle).")
+    lines.append("")
+    if idle:
+        lines.append(f"  {GREEN}Fix:{RESET} `/clear` before long breaks; idle > ~1h on a big context isn't worth keeping warm.")
+    else:
+        lines.append(f"  {GREEN}Fix:{RESET} summarize large content before inserting it; read targeted line ranges, not whole files.")
+    lines.append(f"  {DIM}(heuristic — timestamps align steps to transcript; not exact cache-block attribution){RESET}")
+    return "\n".join(lines)
+
+
 def render_rates(context: float | None, model: str | None, interval: float) -> str:
     """Show the model price table + keep-warm vs rebuild economics for a context."""
     table = pricing.load_pricing()
@@ -1029,6 +1125,8 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser = subparsers.add_parser("watch", help="live single-session panel with cost recommendations")
     watch_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest")
     watch_parser.add_argument("--refresh", type=float, default=2.0, help="refresh interval in seconds; 0 prints once")
+    explain_parser = subparsers.add_parser("explain", help="root-cause why a session got expensive (spike -> cause -> cost)")
+    explain_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest")
     subparsers.add_parser("hook", help="Stop-hook: emit a cost recommendation from the event on stdin")
     rates_parser = subparsers.add_parser("rates", help="model price table + keep-warm vs rebuild economics")
     rates_parser.add_argument("--context", type=float, help="context tokens (default: current session size)")
@@ -1054,6 +1152,9 @@ def main(argv: list[str] | None = None) -> int:
         return tui(max(1, args.limit))
     if args.command == "watch":
         return watch(args.session, args.refresh)
+    if args.command == "explain":
+        print(render_explain(args.session))
+        return 0
     if args.command == "hook":
         return hook()
     if args.command == "rates":
