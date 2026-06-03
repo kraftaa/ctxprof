@@ -1,15 +1,17 @@
 # claude-context-tools
 
-A small, dependency-free CLI (`ctx`) for understanding where a Claude Code
-session's context and cache budget actually goes — three lenses:
+A **context profiler for Claude Code sessions** — a small, dependency-free CLI
+(`ctx`) for understanding where a session's context and cache budget actually
+goes. Like a CPU/memory profiler, but for tokens. Several lenses:
 
 - **Live** — `ctx dashboard` (all sessions) / `ctx watch` (one session): how much,
   right now.
 - **Per-turn** — `ctx steps` / `ctx digest` / `ctx rates`: what each turn cost and
   where the money went.
 - **Offline** — `ctx audit`: why one session burned context/cache, after the fact.
-- **Explain** — `ctx explain`: the *story* of a cost spike — spike → cause
-  (idle eviction or a big insert) → cache collapse → rebuild cost → fix.
+- **Explain** — `ctx explain`: ranks a session's biggest *avoidable* costs
+  (idle cache rebuilds, repeated reads, large inserts) with $ impact and a fix
+  for each, splitting measured (real billed rebuilds) from estimated waste.
 
 All read the same per-session **heartbeat** files that a statusline writes. The
 statusline is the only piece that runs inside Claude Code; everything else is an
@@ -72,10 +74,27 @@ ctx show <session-id-or-prefix>
 ctx watch
 ctx watch <session-id>
 
-# Root-cause why a session got expensive (spike -> cause -> rebuild cost -> fix):
+# Rank a session's biggest avoidable costs (the "profiler" view):
 ctx explain
-ctx explain <session-id>
+ctx explain <session-id> --top 5
+```
 
+`ctx explain` looks like:
+
+```text
+ctx explain  Make Claude workflow utility installable …  —  top avoidable costs
+
+  1. $ 51.29       Cache rebuilds after idle >5min (×15)
+        → rebuilt ~7.2M cache tok — /clear before breaks; keep sessions short
+  2. $  0.02 ~est  Large Read result (~35.2k tok)
+        → summarize/cap big output before it enters context
+  3. $  0.01 ~est  Re-reading dashboard.py 27×
+        → ~12.5k redundant tok — read targeted ranges / keep a summary
+
+  Total avoidable: ~$51.32  ($51.29 measured + $0.03 estimated)
+```
+
+```bash
 # Recent per-turn cost feed across all sessions (catches expensive turns):
 ctx steps
 ctx steps --limit 40

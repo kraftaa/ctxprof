@@ -881,47 +881,14 @@ def watch(session: str | None, refresh_seconds: float) -> int:
     return _live(lambda: render_watch(session), refresh_seconds)
 
 
-def _transcript_trigger(transcript_path: str, spike_ts: float, window_s: float = 240) -> tuple[int, str] | None:
-    """Best-effort: the largest content block added just before spike_ts.
+def render_explain(session: str | None, top: int = 5) -> str:
+    """Context profiler: rank a session's biggest *avoidable* costs.
 
-    Returns (chars, label) or None. Correlates the heartbeat step's epoch
-    timestamp with the transcript rows' ISO timestamps.
+    Idle/compaction cache rebuilds are MEASURED (real billed cost of those
+    turns). Repeated reads / commands / large results are ESTIMATED (wasted
+    tokens × cache-read rate). The total is split so the estimate never poses
+    as exact billing.
     """
-    import datetime
-
-    from . import audit
-    path = Path(transcript_path).expanduser()
-    if not path.exists():
-        return None
-    best: tuple[int, str] | None = None
-    for row in audit.read_jsonl(path):
-        ts = row.get("timestamp")
-        try:
-            epoch = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
-        except (ValueError, TypeError):
-            continue
-        if not (spike_ts - window_s <= epoch <= spike_ts + 10):
-            continue
-        message = row.get("message") if isinstance(row.get("message"), dict) else {}
-        content = message.get("content")
-        label = "content"
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    label = "a tool result"
-                    break
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    label = f"a {block.get('name', 'tool')} call"
-        elif str(message.get("role")) == "user":
-            label = "a user message/paste"
-        size = len(audit.content_text(content))
-        if size and (best is None or size > best[0]):
-            best = (size, label)
-    return best
-
-
-def render_explain(session: str | None) -> str:
-    """Narrate why a session got expensive: spike -> cache collapse -> rebuild -> cost."""
     now = time.time()
     rec = find_record(session)
     if not rec:
@@ -934,46 +901,67 @@ def render_explain(session: str | None) -> str:
     if not views:
         return "No step data for this session yet (needs steps/<session>.jsonl)."
 
-    spike = max(views, key=lambda v: v["cost_usd"])
-    if spike["cost_usd"] < 0.25:
-        return (f"{TEAL}ctx explain{RESET}  {truncate(rec.get('session_name') or sid, 50)}\n"
-                f"  No expensive spike found — most-costly turn was step {spike['step']} at "
-                f"${spike['cost_usd']:.4f}. This session looks lean.")
+    rates = pricing.load_pricing()
+    key = pricing.match_model(rec.get("model"), rates)
+    read_rate = rates.get(key, {}).get("cache_read", 0.5)  # $/MTok
 
-    idx = views.index(spike)
-    window = views[max(0, idx - 1): idx + 1]  # the rebuild write usually sits one turn before the cost
-    warm_read = max((v["cache_read"] for v in views[max(0, idx - 5):idx]), default=0.0)
-    write = max((v["cache_write"] for v in window), default=0.0)
-    gap = max((v["gap_s"] for v in window), default=0.0)
-    # cost impact: the spike plus adjacent >=$0.25 turns
-    impact_turns = [v for v in views[max(0, idx - 1): idx + 4] if v["cost_usd"] >= 0.25]
-    impact = sum(v["cost_usd"] for v in impact_turns)
+    def est_cost(tokens: float) -> float:
+        return tokens * read_rate / 1_000_000
 
-    idle = gap > 300
-    cause = (f"idle ~{age(gap)} (> the ~5-min cache TTL) → the cached prefix expired"
-             if idle else "the cached prefix was invalidated (a large block was added, or a /compact)")
+    mistakes: list[tuple[float, str, str, bool]] = []  # (cost, title, fix, measured)
 
-    lines = [
-        f"{TEAL}ctx explain{RESET}  {truncate(rec.get('session_name') or rec.get('repo') or sid, 54)}",
+    # 1) Cache rebuilds — MEASURED (real billed cost of rebuild turns + their settle)
+    rebuild_idx = [i for i, v in enumerate(views)
+                   if v["cache_write"] > 100000 and v["cache_read"] < v["cache_write"] * 0.2]
+    if rebuild_idx:
+        span = {j for i in rebuild_idx for j in (i - 1, i, i + 1) if 0 <= j < len(views)}
+        cost = sum(views[i]["cost_usd"] for i in span)
+        rebuilt = sum(views[i]["cache_write"] for i in rebuild_idx)
+        idle_n = sum(1 for i in rebuild_idx if views[i]["gap_s"] > 300 or (i and views[i - 1]["gap_s"] > 300))
+        how = "after idle >5min" if idle_n * 2 >= len(rebuild_idx) else "after idle / compaction"
+        mistakes.append((cost, f"Cache rebuilds {how} (×{len(rebuild_idx)})",
+                         f"rebuilt ~{compact_int(rebuilt)} cache tok — /clear before breaks; keep sessions short", True))
+
+    # 2) Transcript waste — ESTIMATED (wasted tokens × cache-read rate)
+    transcript = rec.get("transcript_path")
+    tp = Path(transcript).expanduser() if transcript else None
+    if tp and tp.exists():
+        from . import audit
+        an = audit.analyze(audit.read_jsonl(tp), rec, [])
+        for count, chars, path in an["repeated_reads"][:3]:
+            waste = audit.est_tokens(chars) * (count - 1) / count
+            mistakes.append((est_cost(waste), f"Re-reading {Path(path).name} {count}×",
+                             f"~{compact_int(waste)} redundant tok — read targeted ranges / keep a summary", False))
+        for count, chars, _cmd in an["repeated_commands"][:2]:
+            waste = audit.est_tokens(chars) * (count - 1) / count
+            mistakes.append((est_cost(waste), f"Re-running a command {count}×",
+                             f"~{compact_int(waste)} repeated output tok — run once, refer back", False))
+        for size, tool, _label in an["large_results"][:2]:
+            toks = audit.est_tokens(size)
+            mistakes.append((est_cost(toks), f"Large {tool} result (~{compact_int(toks)} tok)",
+                             "summarize/cap big output before it enters context", False))
+
+    mistakes.sort(key=lambda m: m[0], reverse=True)
+    shown = [m for m in mistakes if m[0] > 0][:max(1, top)]
+    title = f"{TEAL}ctx explain{RESET}  {truncate(rec.get('session_name') or rec.get('repo') or sid, 48)}  —  top avoidable costs"
+    if not shown:
+        return f"{title}\n\n  No obvious avoidable cost — this session looks lean."
+
+    total = sum(m[0] for m in shown)
+    measured = sum(m[0] for m in shown if m[3])
+    lines = [title, ""]
+    for n, (cost, what, fix, meas) in enumerate(shown, 1):
+        col = RED if cost >= 1 else YELLOW if cost >= 0.25 else ""
+        tag = "" if meas else " ~est"
+        lines.append(f"  {n}. {col}${cost:>6.2f}{RESET if col else ''}{tag}  {what}")
+        lines.append(f"        → {fix}")
+    lines += [
         "",
-        f"Got expensive at step {spike['step']} (ctx {spike['context_pct']:.0f}%): "
-        f"{RED}+${spike['cost_usd']:.4f}{RESET} that turn.",
-        f"  Cause: {cause}.",
-        f"  Cache: reads {compact_int(warm_read)} → {compact_int(spike['cache_read'])}, "
-        f"rebuild write {compact_int(write)}.",
+        f"  {RED}Total avoidable: ~${total:.2f}{RESET}  "
+        f"(${measured:.2f} measured + ${total - measured:.2f} estimated)",
+        f"  {DIM}Measured = real billed cost of rebuild turns; estimated = wasted tokens × "
+        f"cache-read rate (${read_rate:g}/MTok). Heuristic.{RESET}",
     ]
-    trigger = _transcript_trigger(rec.get("transcript_path") or "", spike["timestamp"])
-    if trigger and not idle:
-        size, label = trigger
-        from . import audit as _audit
-        lines.append(f"  Likely trigger: {label} of ~{compact_int(_audit.est_tokens(size))} tok added just before.")
-    lines.append(f"  Impact: {RED}+${impact:.2f}{RESET} across {len(impact_turns)} turn(s) (rebuild + settle).")
-    lines.append("")
-    if idle:
-        lines.append(f"  {GREEN}Fix:{RESET} `/clear` before long breaks; idle > ~1h on a big context isn't worth keeping warm.")
-    else:
-        lines.append(f"  {GREEN}Fix:{RESET} summarize large content before inserting it; read targeted line ranges, not whole files.")
-    lines.append(f"  {DIM}(heuristic — timestamps align steps to transcript; not exact cache-block attribution){RESET}")
     return "\n".join(lines)
 
 
@@ -1125,8 +1113,9 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser = subparsers.add_parser("watch", help="live single-session panel with cost recommendations")
     watch_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest")
     watch_parser.add_argument("--refresh", type=float, default=2.0, help="refresh interval in seconds; 0 prints once")
-    explain_parser = subparsers.add_parser("explain", help="root-cause why a session got expensive (spike -> cause -> cost)")
+    explain_parser = subparsers.add_parser("explain", help="rank a session's biggest avoidable costs (context profiler)")
     explain_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest")
+    explain_parser.add_argument("--top", type=int, default=5, help="how many mistakes to show")
     subparsers.add_parser("hook", help="Stop-hook: emit a cost recommendation from the event on stdin")
     rates_parser = subparsers.add_parser("rates", help="model price table + keep-warm vs rebuild economics")
     rates_parser.add_argument("--context", type=float, help="context tokens (default: current session size)")
@@ -1153,7 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "watch":
         return watch(args.session, args.refresh)
     if args.command == "explain":
-        print(render_explain(args.session))
+        print(render_explain(args.session, args.top))
         return 0
     if args.command == "hook":
         return hook()
