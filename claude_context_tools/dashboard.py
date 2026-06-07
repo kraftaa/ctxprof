@@ -610,6 +610,15 @@ def step_view(s: dict[str, Any], now: float) -> dict[str, Any]:
     }
 
 
+REBUILD_WRITE_FLOOR = 100_000
+
+
+def is_rebuild(v: dict[str, Any]) -> bool:
+    """A full cache rebuild turn: large write, almost no read (idle eviction or
+    /compact). Shared by explain/watch/digest so their rebuild counts agree."""
+    return v["cache_write"] > REBUILD_WRITE_FLOOR and v["cache_read"] < v["cache_write"] * 0.2
+
+
 def collect_steps(limit: int, since_seconds: float | None) -> list[dict[str, Any]]:
     now = time.time()
     views = [step_view(s, now) for s in recent_steps(limit)]
@@ -636,7 +645,7 @@ def build_digest(views: list[dict[str, Any]]) -> dict[str, Any]:
     pricey = [v for v in views if v["cost_usd"] >= 1.0]
     pricey_spend = round(sum(v["cost_usd"] for v in pricey), 2)
     # full re-caches: large write with little/no read (the expensive idle-rebuild pattern)
-    rebuilds = [v for v in views if v["cache_write"] > 200000 and v["cache_read"] < v["cache_write"] * 0.1]
+    rebuilds = [v for v in views if is_rebuild(v)]
     recs: list[str] = []
     if sessions_by_cost and total_cost > 0:
         t = sessions_by_cost[0]
@@ -847,14 +856,18 @@ def render_watch(session: str | None) -> str:
     sid = str(rec.get("session_id"))
     views = [v for v in (step_view(s, now) for s in recent_steps(3000)) if v["session_id"] == sid]
     last_hour = [v for v in views if v["age_s"] <= 3600]
-    rebuilds = [v for v in last_hour if v["cache_write"] > 100000]
-    pricey = [v for v in last_hour if v["cost_usd"] >= 1.0]
-    rebuild_cost = sum(v["cost_usd"] for v in pricey)
+    rebuilds = [v for v in last_hour if is_rebuild(v)]
+    rebuild_cost = sum(v["cost_usd"] for v in rebuilds)
     hour_cost = sum(v["cost_usd"] for v in last_hour)
     subagent = [v for v in last_hour if v.get("agent")]
     ctxn = maybe_number(rec.get("context_pct")) or 0.0
     ctx_color = RED if ctxn >= 80 else YELLOW if ctxn >= 60 else GREEN
     seconds_since = now - number(rec.get("updated_at"))
+    # modeled cost to rebuild the current window (from the price table, not guessed)
+    table = pricing.load_pricing()
+    rebuild_est = pricing.cache_economics(
+        number(rec.get("input_tokens")), pricing.match_model(rec.get("model"), table), table
+    )["rebuild_cost"]
 
     lines = [
         f"{TEAL}ctx watch{RESET}  {truncate(rec.get('session_name') or rec.get('repo') or sid, 54)}",
@@ -866,7 +879,7 @@ def render_watch(session: str | None) -> str:
     ]
     recs: list[str] = []
     if ctxn >= 60:
-        recs.append(f"context {ctxn:.0f}% — `/clear` if switching tasks; a rebuild of this window costs ~${max(rebuild_cost, 2.0):.1f}")
+        recs.append(f"context {ctxn:.0f}% — `/clear` if switching tasks; a rebuild of this window costs ~${rebuild_est:.2f}")
     if rebuilds:
         recs.append(f"{len(rebuilds)} cache rebuild(s) this hour (≈${rebuild_cost:.2f}) — idle >5min is evicting cache; keep working or `/clear`, don't keep a big context warm-pinging past ~1.3h")
     if seconds_since > 600 and ctxn >= 40:
@@ -910,11 +923,12 @@ def render_explain(session: str | None, top: int = 5) -> str:
 
     mistakes: list[tuple[float, str, str, bool]] = []  # (cost, title, fix, measured)
 
-    # 1) Cache rebuilds — MEASURED (real billed cost of rebuild turns + their settle)
-    rebuild_idx = [i for i, v in enumerate(views)
-                   if v["cache_write"] > 100000 and v["cache_read"] < v["cache_write"] * 0.2]
+    # 1) Cache rebuilds — MEASURED (real billed cost). The big-write turn often
+    # shows $0 with the cost landing on the next heartbeat, so count {i, i+1} per
+    # rebuild (deduped via a set), NOT the preceding turn.
+    rebuild_idx = [i for i, v in enumerate(views) if is_rebuild(v)]
     if rebuild_idx:
-        span = {j for i in rebuild_idx for j in (i - 1, i, i + 1) if 0 <= j < len(views)}
+        span = {j for i in rebuild_idx for j in (i, i + 1) if 0 <= j < len(views)}
         cost = sum(views[i]["cost_usd"] for i in span)
         rebuilt = sum(views[i]["cache_write"] for i in rebuild_idx)
         idle_n = sum(1 for i in rebuild_idx if views[i]["gap_s"] > 300 or (i and views[i - 1]["gap_s"] > 300))
@@ -927,6 +941,9 @@ def render_explain(session: str | None, top: int = 5) -> str:
     tp = Path(transcript).expanduser() if transcript else None
     if tp and tp.exists():
         from . import audit
+        # est_tokens reads audit's module-global tokenizer factor; set it for this
+        # model so estimates here match `ctx audit` (else Opus 4.7+ runs ~35% low).
+        audit.TOKENIZER_FACTOR = audit.tokenizer_factor(rec.get("model"))
         an = audit.analyze(audit.read_jsonl(tp), rec, [])
         for count, chars, path in an["repeated_reads"][:3]:
             waste = audit.est_tokens(chars) * (count - 1) / count
@@ -999,8 +1016,10 @@ def render_rates(context: float | None, model: str | None, interval: float) -> s
             f"  one cache read (warm turn):  ${e['ping_cost']:.4f}",
             f"  keep warm:                   ${e['warm_per_hour']:.2f}/hr  ({e['pings_per_hour']:.0f} pings/hr)",
             f"  one full rebuild:            ${e['rebuild_cost']:.4f}",
-            f"  break-even idle:             {e['breakeven_hours'] * 60:.0f} min  "
-            f"(idle longer → let it expire / clear)",
+            (f"  break-even idle:             {e['breakeven_hours'] * 60:.0f} min  "
+             f"(idle longer → let it expire / clear)")
+            if e["breakeven_hours"] is not None
+            else "  break-even idle:             n/a (no keep-alive pings → staying warm is free)",
         ]
     return "\n".join(lines)
 

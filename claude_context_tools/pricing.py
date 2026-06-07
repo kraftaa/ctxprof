@@ -65,8 +65,13 @@ def match_model(name: str | None, pricing: dict[str, Any] | None = None) -> str:
     key = f"{family}-{version}"
     if key in pricing:
         return key
-    # fall back to the highest known version in the same family, else the default
-    fam_keys = sorted((k for k in pricing if k.startswith(family + "-")), reverse=True)
+
+    # fall back to the highest known version in the same family (numeric sort so
+    # 4.10 > 4.9), else the default.
+    def _ver(k: str) -> list[int]:
+        return [int(p) for p in re.findall(r"\d+", k.split("-", 1)[-1])] or [0]
+
+    fam_keys = sorted((k for k in pricing if k.startswith(family + "-")), key=_ver, reverse=True)
     return fam_keys[0] if fam_keys else DEFAULT_MODEL
 
 
@@ -86,7 +91,8 @@ def cache_economics(
     pings_per_hour = 3600 / ping_interval_s if ping_interval_s else 0
     warm_per_hour = pings_per_hour * ping
     rebuild = context_tokens * write / 1_000_000
-    breakeven_h = rebuild / warm_per_hour if warm_per_hour else 0.0
+    # None = keeping warm is free (no pings), so there's no break-even point.
+    breakeven_h = rebuild / warm_per_hour if warm_per_hour else None
     return {
         "model_key": model_key,
         "context_tokens": context_tokens,
