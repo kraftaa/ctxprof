@@ -54,6 +54,28 @@ arguments to see them all.
 No clone needed after install. To run without installing, use
 `python3 -m claude_context_tools.cli <subcommand>` from this directory.
 
+## When to run what
+
+| I want to… | Run |
+|---|---|
+| See what all my open sessions cost **right now** | `ctx dashboard` |
+| Find **which session is the money sink** | `ctx digest` (ranks sessions by cost) |
+| Know **why a session got expensive + how to fix it** | `ctx explain <id>` |
+| **Watch one session live** while I work (split pane) | `ctx watch <id>` |
+| See **per-turn** costs / catch a spike as it happens | `ctx steps` |
+| **Deep offline** breakdown of one session's transcript | `ctx audit <id>` |
+| Check **prices / keep-warm-vs-rebuild** math | `ctx rates` |
+
+Typical flow: **`ctx digest`** to see which session is costing the most →
+**`ctx explain <id>`** on that one to see the avoidable costs and the fix.
+
+**Which session do the single-session commands act on?** With no id they pick the
+**newest** (most recently active) session, and the **header line shows its name**
+so you can confirm. To target another, pass a **session id or prefix** — get the
+ids from `ctx dashboard` (the `ID` column) and run `ctx show <id>` to see a
+session's repo/cwd. No time window: `ctx explain`/`audit` cover the **whole
+session**; `ctx digest --since 2h` and `ctx steps --limit N` are the windowed ones.
+
 ## Use it
 
 ```bash
