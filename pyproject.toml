@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-context-tools"
+name = "ctxprof"
 version = "0.1.0"
 description = "Live dashboard and offline context/cache audit for Claude Code sessions"
 readme = "README.md"

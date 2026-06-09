@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "install":
         return install.main(rest)
     if cmd in ("version", "--version", "-V"):
-        print(f"ctx (claude-context-tools) {__version__}")
+        print(f"ctx (ctxprof) {__version__}")
         return 0
 
     print(f"unknown command: {cmd}\n", file=sys.stderr)

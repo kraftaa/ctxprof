@@ -1,6 +1,6 @@
-# claude-context-tools
+# ctxprof
 
-A **context profiler for Claude Code sessions** — a small, dependency-free CLI
+A **context profiler for Claude Code sessions** (package `ctxprof`, command `ctx`) — a small, dependency-free CLI
 (`ctx`) for understanding where a session's context and cache budget actually
 goes. Like a CPU/memory profiler, but for tokens. Several lenses:
 
@@ -35,14 +35,14 @@ Requires `python3` (3.9+). The heartbeat statusline also needs `jq` + `awk`
 
 ```bash
 # Recommended: isolated global install with pipx
-pipx install claude-context-tools          # from PyPI (once published)
+pipx install ctxprof          # from PyPI
 # or from a git checkout (replace <your-repo-url>):
 pipx install "git+<your-repo-url>#subdirectory=claude-context-tools"
 
 # Or plain pip (ideally in a venv)
-pip install claude-context-tools
+pip install ctxprof
 
-# Or straight from a clone, editable
+# Or straight from a clone, editable (path is the directory in the repo)
 pip install -e claude-context-tools
 ```
 
