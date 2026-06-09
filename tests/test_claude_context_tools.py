@@ -210,6 +210,8 @@ class PricingTests(unittest.TestCase):
         self.assertEqual(pricing.match_model("Sonnet 4.6"), "sonnet-4.6")
         self.assertTrue(pricing.match_model("Opus 9.9").startswith("opus-"))  # unknown -> family fallback
         self.assertEqual(pricing.match_model(""), pricing.DEFAULT_MODEL)
+        self.assertEqual(pricing.match_model("Claude Fable 5 (1M context)"), "fable-5")
+        self.assertEqual(pricing.match_model("fable"), "fable-5")  # no version -> family fallback
 
     def test_economics_breakeven_is_size_independent(self):
         a = pricing.cache_economics(100_000, "opus-4.8")

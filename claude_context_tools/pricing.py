@@ -36,6 +36,9 @@ DEFAULT_PRICING: dict[str, dict[str, float]] = {
     "sonnet-4.5": {"input": 3, "output": 15, "cache_read": 0.30, "cache_write_5m": 3.75, "cache_write_1h": 6},
     "sonnet-4": {"input": 3, "output": 15, "cache_read": 0.30, "cache_write_5m": 3.75, "cache_write_1h": 6},
     "haiku-4.5": {"input": 1, "output": 5, "cache_read": 0.10, "cache_write_5m": 1.25, "cache_write_1h": 2},
+    # input/output from OpenRouter; cache rates assume Anthropic's standard
+    # multipliers (read 0.1x, 5m write 1.25x, 1h write 2x) — not officially listed.
+    "fable-5": {"input": 10, "output": 50, "cache_read": 1.00, "cache_write_5m": 12.50, "cache_write_1h": 20},
 }
 DEFAULT_MODEL = "opus-4.8"
 OVERRIDE_PATH = Path(os.environ.get("CLAUDE_CTX_PRICING", "~/.claude/ctx-pricing.json")).expanduser()
@@ -59,7 +62,7 @@ def match_model(name: str | None, pricing: dict[str, Any] | None = None) -> str:
     """Map a heartbeat model string ('Opus 4.8 (1M context)') to a pricing key."""
     pricing = pricing or load_pricing()
     s = (name or "").lower()
-    family = next((f for f in ("opus", "sonnet", "haiku") if f in s), "")
+    family = next((f for f in ("opus", "sonnet", "haiku", "fable") if f in s), "")
     match = re.search(r"(\d+\.\d+|\d+)", s)
     version = match.group(1) if match else ""
     key = f"{family}-{version}"
