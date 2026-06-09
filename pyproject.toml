@@ -19,8 +19,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/kraftaa/claude_workflow"
-Source = "https://github.com/kraftaa/claude_workflow/tree/main/claude-context-tools"
+Homepage = "https://github.com/kraftaa/ctxprof"
+Source = "https://github.com/kraftaa/ctxprof"
 
 [project.scripts]
 ctx = "claude_context_tools.cli:main"

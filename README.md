@@ -36,14 +36,14 @@ Requires `python3` (3.9+). The heartbeat statusline also needs `jq` + `awk`
 ```bash
 # Recommended: isolated global install with pipx
 pipx install ctxprof          # from PyPI
-# or from a git checkout (replace <your-repo-url>):
-pipx install "git+<your-repo-url>#subdirectory=claude-context-tools"
+# or straight from the git repo:
+pipx install "git+https://github.com/kraftaa/ctxprof"
 
 # Or plain pip (ideally in a venv)
 pip install ctxprof
 
-# Or straight from a clone, editable (path is the directory in the repo)
-pip install -e claude-context-tools
+# Or straight from a clone, editable
+pip install -e .
 ```
 
 This installs one command, `ctx`, an umbrella with subcommands:
