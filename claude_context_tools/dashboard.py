@@ -1111,6 +1111,215 @@ def show(session: str | None) -> int:
     return 0
 
 
+def collect_session_stats(since_seconds: float | None) -> list[dict[str, Any]]:
+    """Per-session cache-reuse + cost rollup from the step files, for `ctx compare`.
+
+    Cache reuse is summed from per-turn deltas (the same basis as `ctx audit`), not
+    the heartbeat's point-in-time snapshot, so it reflects the whole session.
+    Sessions with no step data are simply absent (unknown, not zero).
+    """
+    now = time.time()
+    steps_dir = STATE_DIR / "steps"
+    if not steps_dir.exists():
+        return []
+    agg: dict[str, dict[str, Any]] = {}
+    for path in steps_dir.glob("*.jsonl"):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                step = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = number(step.get("timestamp"))
+            if since_seconds is not None and now - ts > since_seconds:
+                continue
+            sid = clean_session_id(step.get("session_id"))
+            a = agg.get(sid)
+            if a is None:
+                a = agg[sid] = {
+                    "session_id": sid,
+                    "label": step.get("session_name") or step.get("repo") or sid,
+                    "repo": step.get("repo") or "-",
+                    "turns": 0, "cache_read": 0.0, "cache_write": 0.0,
+                    "cost_usd": 0.0, "tokens": 0.0,
+                    "rebuild_turns": 0, "rebuild_write": 0.0, "rebuild_cost": 0.0,
+                    "last_ts": ts, "transcript_path": step.get("transcript_path") or "",
+                }
+            v = step_view(step, now)
+            a["turns"] += 1
+            a["cache_read"] += v["cache_read"]
+            a["cache_write"] += v["cache_write"]
+            a["cost_usd"] += v["cost_usd"]
+            a["tokens"] += v["tokens"]
+            if is_rebuild(v):
+                a["rebuild_turns"] += 1
+                a["rebuild_write"] += v["cache_write"]
+                a["rebuild_cost"] += v["cost_usd"]
+            if ts >= a["last_ts"]:
+                a["last_ts"] = ts
+                a["label"] = step.get("session_name") or a["label"]
+                a["repo"] = step.get("repo") or a["repo"]
+                if step.get("transcript_path"):
+                    a["transcript_path"] = step.get("transcript_path")
+
+    stats = list(agg.values())
+    for a in stats:
+        cacheable = a["cache_read"] + a["cache_write"]
+        a["reuse"] = (a["cache_read"] / cacheable) if cacheable > 0 else None
+        a["cost_usd"] = round(a["cost_usd"], 4)
+    return stats
+
+
+def build_comparison(stats: list[dict[str, Any]], limit: int = 8) -> dict[str, Any]:
+    """Cross-session rollup: cache-reuse distribution, rebuild waste, repo spend."""
+    rated = [a for a in stats if a["reuse"] is not None]
+    total_read = sum(a["cache_read"] for a in stats)
+    total_write = sum(a["cache_write"] for a in stats)
+    cacheable = total_read + total_write
+    by_reuse = sorted(rated, key=lambda a: a["reuse"])
+    repo_cost: dict[str, float] = {}
+    for a in stats:
+        repo_cost[a["repo"]] = repo_cost.get(a["repo"], 0.0) + a["cost_usd"]
+    return {
+        "sessions": len(stats),
+        "rated_sessions": len(rated),
+        "turns": sum(a["turns"] for a in stats),
+        "total_cost_usd": round(sum(a["cost_usd"] for a in stats), 4),
+        "total_tokens": sum(a["tokens"] for a in stats),
+        "overall_cache_reuse": (total_read / cacheable) if cacheable > 0 else None,
+        "avg_cache_reuse": (sum(a["reuse"] for a in rated) / len(rated)) if rated else None,
+        "best_session": by_reuse[-1] if by_reuse else None,
+        "worst_session": by_reuse[0] if by_reuse else None,
+        "lowest_reuse": by_reuse[:limit],
+        "rebuild": {
+            "turns": sum(a["rebuild_turns"] for a in stats),
+            "write_tokens": sum(a["rebuild_write"] for a in stats),
+            "cost_usd": round(sum(a["rebuild_cost"] for a in stats), 4),
+        },
+        "by_repo_cost": sorted(repo_cost.items(), key=lambda kv: kv[1], reverse=True)[:limit],
+    }
+
+
+def deep_waste(stats: list[dict[str, Any]], limit: int) -> dict[str, Any]:
+    """Aggregate repeated reads + dead context across session transcripts (slow).
+
+    Opt-in (`--deep`): reads each session's transcript and runs the audit parser.
+    Token figures are ~chars/4 estimates, like `ctx audit`.
+    """
+    from . import audit
+
+    read_waste: dict[str, dict[str, Any]] = {}
+    dead: dict[str, dict[str, Any]] = {}
+    scanned = skipped = 0
+    for a in stats:
+        tp = a.get("transcript_path")
+        path = Path(tp).expanduser() if tp else None
+        if not path or not path.exists():
+            skipped += 1
+            continue
+        scanned += 1
+        analysis = audit.analyze(audit.read_jsonl(path), status=None, steps=[])
+        for count, chars, fpath in analysis["repeated_reads"]:
+            d = read_waste.setdefault(fpath, {"path": fpath, "extra_reads": 0, "chars": 0, "sessions": 0})
+            d["extra_reads"] += count - 1
+            d["chars"] += chars
+            d["sessions"] += 1
+        for chars, fpath in analysis["dead_context"]:
+            d = dead.setdefault(fpath, {"path": fpath, "chars": 0, "sessions": 0})
+            d["chars"] += chars
+            d["sessions"] += 1
+    return {
+        "scanned": scanned,
+        "skipped_no_transcript": skipped,
+        "top_repeated_reads": sorted(read_waste.values(), key=lambda d: d["chars"] * max(1, d["extra_reads"]), reverse=True)[:limit],
+        "top_dead_context": sorted(dead.values(), key=lambda d: d["chars"], reverse=True)[:limit],
+    }
+
+
+def _reuse_color(frac: float | None) -> str:
+    if frac is None:
+        return DIM
+    if frac >= 0.8:
+        return GREEN
+    if frac >= 0.5:
+        return YELLOW
+    return RED
+
+
+def _reuse_pct(frac: float | None) -> str:
+    return f"{frac * 100:.0f}%" if frac is not None else "n/a"
+
+
+def render_compare(since: str | None, as_json: bool, deep: bool, limit: int) -> str:
+    since_seconds = parse_since(since)
+    stats = collect_session_stats(since_seconds)
+    comp = build_comparison(stats, limit)
+    if deep:
+        comp["deep"] = deep_waste(stats, limit)
+
+    if as_json:
+        return json.dumps(comp, indent=2, sort_keys=True)
+    if not stats:
+        return "No step data in window — ctx compare needs the heartbeat statusline's steps/<session>.jsonl files."
+
+    window = f"last {since}" if since else "all recorded sessions"
+    ov, av = comp["overall_cache_reuse"], comp["avg_cache_reuse"]
+    lines = [
+        f"{TEAL}Session comparison{RESET}  ({window}: {comp['sessions']} session(s), {comp['turns']} turns)",
+        f"  spend ${comp['total_cost_usd']:.2f}  ·  {compact_int(comp['total_tokens'])} tok",
+        "",
+        f"  Cache reuse  token-weighted {_reuse_color(ov)}{_reuse_pct(ov)}{RESET}   per-session avg {_reuse_color(av)}{_reuse_pct(av)}{RESET}",
+    ]
+    best, worst = comp["best_session"], comp["worst_session"]
+    if best:
+        lines.append(f"    best  {_reuse_color(best['reuse'])}{_reuse_pct(best['reuse']):>4}{RESET}  {truncate(best['label'], 44)}")
+    if worst:
+        lines.append(f"    worst {_reuse_color(worst['reuse'])}{_reuse_pct(worst['reuse']):>4}{RESET}  {truncate(worst['label'], 44)}")
+
+    rb = comp["rebuild"]
+    if rb["turns"]:
+        lines += [
+            "",
+            f"  Idle cache rebuilds: {rb['turns']} turn(s), {compact_int(rb['write_tokens'])} tok rewritten, ~${rb['cost_usd']:.2f}",
+            f"    {DIM}large writes with little/no read — keep big sessions warm or /clear before long idle{RESET}",
+        ]
+
+    if comp["lowest_reuse"]:
+        lines += ["", "  Lowest-reuse sessions (learn from these):"]
+        for a in comp["lowest_reuse"]:
+            lines.append(
+                f"    {_reuse_color(a['reuse'])}{_reuse_pct(a['reuse']):>4}{RESET}  "
+                f"${a['cost_usd']:>7.2f}  {compact_int(a['tokens']):>6} tok  {truncate(a['label'], 38)}"
+            )
+
+    if comp["by_repo_cost"]:
+        lines += ["", "  Spend by repo:"]
+        for repo, cost in comp["by_repo_cost"]:
+            lines.append(f"    ${cost:>8.2f}  {truncate(repo, 44)}")
+
+    deep_data = comp.get("deep")
+    if deep_data is not None:
+        lines += ["", f"  {TEAL}Top wasted files{RESET}  (deep scan of {deep_data['scanned']} transcript(s); {deep_data['skipped_no_transcript']} not on disk):"]
+        if deep_data["top_repeated_reads"]:
+            lines.append("    repeated reads:")
+            for d in deep_data["top_repeated_reads"]:
+                lines.append(f"      +{d['extra_reads']}x  ~{compact_int(d['chars'] // 4)} tok  {truncate(d['path'], 50)}")
+        if deep_data["top_dead_context"]:
+            lines.append("    loaded but never referenced again:")
+            for d in deep_data["top_dead_context"]:
+                lines.append(f"      ~{compact_int(d['chars'] // 4)} tok  {truncate(d['path'], 50)}")
+        if not deep_data["top_repeated_reads"] and not deep_data["top_dead_context"]:
+            lines.append("    none detected across scanned transcripts")
+
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ctx", description="Claude Code multi-session status dashboard")
     subparsers = parser.add_subparsers(dest="command")
@@ -1127,6 +1336,11 @@ def main(argv: list[str] | None = None) -> int:
     digest_parser.add_argument("--limit", type=int, default=1000, help="max recent turns per session to scan")
     digest_parser.add_argument("--since", help="only turns newer than e.g. 30m, 2h, 1d")
     digest_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    compare_parser = subparsers.add_parser("compare", help="cross-session cache-reuse, rebuild waste, and spend over a window")
+    compare_parser.add_argument("--since", help="only sessions with turns newer than e.g. 7d, 30d, 12h (default: all recorded)")
+    compare_parser.add_argument("--limit", type=int, default=8, help="rows per section")
+    compare_parser.add_argument("--deep", action="store_true", help="also scan transcripts for top wasted files (slower)")
+    compare_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     tui_parser = subparsers.add_parser("tui", help="interactive scrollable/filterable step browser")
     tui_parser.add_argument("--limit", type=int, default=500, help="number of recent turns to load")
     watch_parser = subparsers.add_parser("watch", help="live single-session panel with cost recommendations")
@@ -1155,6 +1369,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "digest":
         print(render_digest(max(1, args.limit), args.since, args.json))
+        return 0
+    if args.command == "compare":
+        print(render_compare(args.since, args.json, args.deep, max(1, args.limit)))
         return 0
     if args.command == "tui":
         return tui(max(1, args.limit))

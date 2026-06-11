@@ -111,6 +111,44 @@ class AnalyzeTranscriptTests(unittest.TestCase):
         self.assertNotIn("/repo/src/auth.py", dead)
 
 
+class CompareTests(unittest.TestCase):
+    def _stats(self):
+        return [
+            {"session_id": "s1", "label": "good", "repo": "r1", "turns": 3,
+             "cache_read": 900.0, "cache_write": 100.0, "cost_usd": 1.0, "tokens": 1000.0,
+             "rebuild_turns": 0, "rebuild_write": 0.0, "rebuild_cost": 0.0, "reuse": 0.9, "transcript_path": ""},
+            {"session_id": "s2", "label": "bad", "repo": "r2", "turns": 2,
+             "cache_read": 200.0, "cache_write": 800.0, "cost_usd": 3.0, "tokens": 2000.0,
+             "rebuild_turns": 1, "rebuild_write": 500000.0, "rebuild_cost": 2.0, "reuse": 0.2, "transcript_path": ""},
+        ]
+
+    def test_best_and_worst_by_reuse(self):
+        comp = dashboard.build_comparison(self._stats())
+        self.assertEqual(comp["best_session"]["label"], "good")
+        self.assertEqual(comp["worst_session"]["label"], "bad")
+
+    def test_token_weighted_reuse(self):
+        comp = dashboard.build_comparison(self._stats())
+        # read/(read+write) across all sessions = (900+200)/((900+200)+(100+800)) = 0.55.
+        self.assertAlmostEqual(comp["overall_cache_reuse"], 1100 / 2000, places=6)
+
+    def test_rebuild_and_repo_aggregation(self):
+        comp = dashboard.build_comparison(self._stats())
+        self.assertEqual(comp["rebuild"]["turns"], 1)
+        self.assertEqual(comp["rebuild"]["write_tokens"], 500000.0)
+        self.assertEqual(comp["by_repo_cost"][0][0], "r2")  # higher spend first
+        json.dumps(comp)  # serializable
+
+    def test_unrated_session_excluded_from_reuse(self):
+        stats = self._stats() + [{"session_id": "s3", "label": "no-cache", "repo": "r3", "turns": 1,
+                                  "cache_read": 0.0, "cache_write": 0.0, "cost_usd": 0.5, "tokens": 10.0,
+                                  "rebuild_turns": 0, "rebuild_write": 0.0, "rebuild_cost": 0.0,
+                                  "reuse": None, "transcript_path": ""}]
+        comp = dashboard.build_comparison(stats)
+        self.assertEqual(comp["sessions"], 3)
+        self.assertEqual(comp["rated_sessions"], 2)  # the cache-less one is unknown, not 0%
+
+
 class GuardTests(unittest.TestCase):
     # AWS's own documentation example key — clearly synthetic, safe to embed.
     AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
@@ -250,6 +288,13 @@ class EndToEndCliTests(unittest.TestCase):
                           "--state-dir", str(STATE_DIR), "--json"])
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["schema"], "claude-context-audit/1")
+
+    def test_compare_json_cli(self):
+        proc = self._run(["compare", "--json"], env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["sessions"], 1)
+        # Fixture steps: read 0+22000+22200+500=44700, write 22000+200+150+18000=40350.
+        self.assertAlmostEqual(payload["overall_cache_reuse"], 44700 / 85050, places=4)
 
     def test_guard_json_cli(self):
         proc = self._run(["guard", "--transcript", str(TRANSCRIPT),

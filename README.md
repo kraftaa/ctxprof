@@ -8,6 +8,9 @@ goes. Like a CPU/memory profiler, but for tokens. Several lenses:
   right now.
 - **Per-turn** — `ctx steps` / `ctx digest` / `ctx rates`: what each turn cost and
   where the money went.
+- **Cross-session** — `ctx compare`: cache-reuse quality across many sessions
+  (best/worst/average), aggregate idle-rebuild waste, and spend by repo over a
+  window — a productivity lens, not just one session's diagnostics.
 - **Offline** — `ctx audit`: why one session burned context/cache, after the fact.
 - **Explain** — `ctx explain`: ranks a session's biggest *avoidable* costs
   (idle cache rebuilds, repeated reads, large inserts) with $ impact and a fix
@@ -51,9 +54,9 @@ pip install -e .
 ```
 
 This installs one command, `ctx`, an umbrella with subcommands:
-`dashboard`, `watch`, `explain`, `show`, `steps`, `digest`, `rates`, `audit`,
-`guard`, `tui`, `install` (plus `statusline`/`hook` plumbing). Run `ctx` with no
-arguments to see them all.
+`dashboard`, `watch`, `explain`, `show`, `steps`, `digest`, `compare`, `rates`,
+`audit`, `guard`, `tui`, `install` (plus `statusline`/`hook` plumbing). Run `ctx`
+with no arguments to see them all.
 
 No clone needed after install. To run without installing, use
 `python3 -m claude_context_tools.cli <subcommand>` from this directory.
@@ -64,6 +67,7 @@ No clone needed after install. To run without installing, use
 |---|---|
 | See what all my open sessions cost **right now** | `ctx dashboard` |
 | Find **which session is the money sink** | `ctx digest` (ranks sessions by cost) |
+| Compare **cache reuse / waste across many sessions** | `ctx compare --since 30d` |
 | Know **why a session got expensive + how to fix it** | `ctx explain <id>` |
 | **Watch one session live** while I work (split pane) | `ctx watch <id>` |
 | See **per-turn** costs / catch a spike as it happens | `ctx steps` |
@@ -148,6 +152,11 @@ into the conversation, or use the bundled `/ctx` slash command:
 !ctx digest --since 2h
 /ctx steps
 /ctx steps --json --limit 200   # then ask Claude to summarize the big turns
+
+# Cross-session learning (cache reuse, rebuild waste, spend by repo):
+ctx compare --since 30d
+ctx compare --since 7d --deep    # also scan transcripts for top wasted files (slower)
+ctx compare --json
 
 # Offline "why did it burn?" audit:
 ctx audit --latest
@@ -248,6 +257,29 @@ at what actually crossed into *this conversation*:
   data can over-trigger. Treat findings as leads to verify, not verdicts.
 - **Tier 1 only.** It does not yet do taint analysis (untrusted input → shell
   execution), MCP tool-risk, or prompt-injection phrase detection.
+
+## What `ctx compare` reports
+
+Cross-session learning over a window (`--since 30d`, or all recorded sessions):
+
+- **Cache reuse** — both **token-weighted** (read ÷ cacheable across all turns)
+  and the **per-session average**, plus the **best** and **worst** sessions by
+  name. A gap between the two means your big sessions reuse cache worse than your
+  small ones.
+- **Idle cache rebuilds** — turns that rewrote a large window with little/no read
+  (the same `is_rebuild` rule `explain`/`watch` use), totalled with their cost —
+  your biggest avoidable cross-session pattern.
+- **Lowest-reuse sessions** and **spend by repo** — where to focus.
+- `--deep` additionally scans each session's transcript for the **top wasted
+  files** (repeated reads + loaded-but-unused) aggregated across sessions.
+
+### Honest limits
+
+- Reuse is summed from **per-turn deltas** (same basis as `ctx audit`), so a
+  session with **no step file is absent**, not counted as 0% — *unknown is not
+  zero*. The rated-session count is reported separately.
+- `--deep` token figures are `~chars/4` **estimates**; it can only scan
+  transcripts still present on disk (it reports how many it skipped).
 
 ## Dashboard notes
 
