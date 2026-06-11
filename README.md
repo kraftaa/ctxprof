@@ -244,6 +244,11 @@ at what actually crossed into *this conversation*:
   `credentials`/`.netrc`/`.npmrc`, kube/service-account configs.
 - **Dangerous commands** — `curl … | bash`, `rm -rf /` (or `~`), fork bombs,
   `chmod 777`, writes to block devices, `sudo` (LOW). Severity-ranked HIGH/MED/LOW.
+  Pure-data carriers (`echo`/`grep`/`printf`) are suppressed — a dangerous string
+  quoted as their argument isn't an action.
+- **Potential taint** — untrusted content (a `WebFetch`/`WebSearch`, or a file read
+  *outside* the repo) followed within a few turns by a shell command or file edit.
+  Low/medium confidence by design (see limits).
 
 ### Honest limits
 
@@ -255,8 +260,13 @@ at what actually crossed into *this conversation*:
   *known* secret formats and *named* dangerous commands; a novel token shape or
   an obfuscated command can slip through, and a real-looking string in sample
   data can over-trigger. Treat findings as leads to verify, not verdicts.
-- **Tier 1 only.** It does not yet do taint analysis (untrusted input → shell
-  execution), MCP tool-risk, or prompt-injection phrase detection.
+- **Taint is correlation, not proof.** It only knows untrusted content arrived
+  *before* an action, not that the action was influenced by it — so taint findings
+  are LOW/MED and show the turn distance, as leads to review. Reads are treated as
+  untrusted only when the repo root is known; otherwise taint stays silent on reads
+  rather than guess.
+- **Not yet covered:** MCP tool-risk (needs config, not the transcript) and
+  prompt-injection phrase detection.
 
 ## What `ctx compare` reports
 
