@@ -12,6 +12,10 @@ goes. Like a CPU/memory profiler, but for tokens. Several lenses:
 - **Explain** — `ctx explain`: ranks a session's biggest *avoidable* costs
   (idle cache rebuilds, repeated reads, large inserts) with $ impact and a fix
   for each, splitting measured (real billed rebuilds) from estimated waste.
+- **Guard** — `ctx guard`: scans a session's *trust boundary* for secrets that
+  entered context (`.env`/keys/tokens) and dangerous shell commands that ran
+  (`rm -rf /`, `curl … | bash`, `sudo`). Findings are **redacted** — a secret is
+  shown only as a prefix + length + sha1, never in the clear.
 
 All read the same per-session **heartbeat** files that a statusline writes. The
 statusline is the only piece that runs inside Claude Code; everything else is an
@@ -48,7 +52,7 @@ pip install -e .
 
 This installs one command, `ctx`, an umbrella with subcommands:
 `dashboard`, `watch`, `explain`, `show`, `steps`, `digest`, `rates`, `audit`,
-`tui`, `install` (plus `statusline`/`hook` plumbing). Run `ctx` with no
+`guard`, `tui`, `install` (plus `statusline`/`hook` plumbing). Run `ctx` with no
 arguments to see them all.
 
 No clone needed after install. To run without installing, use
@@ -64,6 +68,7 @@ No clone needed after install. To run without installing, use
 | **Watch one session live** while I work (split pane) | `ctx watch <id>` |
 | See **per-turn** costs / catch a spike as it happens | `ctx steps` |
 | **Deep offline** breakdown of one session's transcript | `ctx audit <id>` |
+| Scan a session for **secrets in context / dangerous commands** | `ctx guard <id>` |
 | Check **prices / keep-warm-vs-rebuild** math | `ctx rates` |
 
 Typical flow: **`ctx digest`** to see which session is costing the most →
@@ -149,6 +154,11 @@ ctx audit --latest
 ctx audit --session <session-id>
 ctx audit --transcript ~/.claude/projects/<proj>/<session>.jsonl
 ctx audit --latest --json        # machine-readable
+
+# Security: secrets in context / dangerous commands (redacted output):
+ctx guard --latest
+ctx guard --session <session-id> --json
+ctx guard --latest --strict      # exit non-zero if anything is found (CI gating)
 ```
 
 ## Turn on the heartbeat (one-time)
@@ -192,6 +202,9 @@ and these tools will read it. To wire it by hand instead:
   output, deferred tool lists) totalled separately.
 - **Repeated file reads / commands / duplicate output blobs** — content paid for
   more than once.
+- **Loaded but never referenced again** — files read into context whose path
+  never reappears afterward (a *lower bound* on dead context: the model can use a
+  file's content without naming its path, so this under-reports, never over-claims).
 - **Large pasted logs / large tool results** and **subagent report weight**.
 - **Cache telemetry** — per-turn behavior, separating expected initial
   **warm-up** from likely mid-session **invalidation** (cache was warm, then
@@ -209,6 +222,32 @@ and these tools will read it. To wire it by hand instead:
   not exact cache-block attribution.
 - **Unknown is not zero.** With no step file, the audit says per-turn cache
   behavior is unknown rather than reporting `0`.
+
+## What `ctx guard` reports
+
+A session **trust-boundary** scan (Tier 1), not a repo secret scanner — it looks
+at what actually crossed into *this conversation*:
+
+- **Secrets in context** — known-format keys/tokens (AWS `AKIA…`, private-key
+  blocks, GitHub/Slack/Google/Stripe tokens, bearer tokens) and `key = value`
+  secret assignments found in tool results, file reads, pasted text, or tool inputs.
+- **Sensitive file reads** — `.env`, `*.pem`/`*.key`, SSH private keys, cloud
+  `credentials`/`.netrc`/`.npmrc`, kube/service-account configs.
+- **Dangerous commands** — `curl … | bash`, `rm -rf /` (or `~`), fork bombs,
+  `chmod 777`, writes to block devices, `sudo` (LOW). Severity-ranked HIGH/MED/LOW.
+
+### Honest limits
+
+- **Redacted by design.** A matched secret is never printed — only a 3-char
+  prefix, its length, and a sha1 fingerprint (so duplicates collapse) — so the
+  report can't become the leak it warns about. Placeholder-looking values
+  (`your_password`, `<token>`, `example…`) are suppressed.
+- **Pattern-based, so it has both misses and false positives.** It finds
+  *known* secret formats and *named* dangerous commands; a novel token shape or
+  an obfuscated command can slip through, and a real-looking string in sample
+  data can over-trigger. Treat findings as leads to verify, not verdicts.
+- **Tier 1 only.** It does not yet do taint analysis (untrusted input → shell
+  execution), MCP tool-risk, or prompt-injection phrase detection.
 
 ## Dashboard notes
 

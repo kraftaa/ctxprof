@@ -16,5 +16,5 @@
   "total_tokens": 51200,
   "cost_usd": 0.42,
   "duration_ms": 600000,
-  "transcript_path": "/Users/maria/Documents/GitHub/extra/claude_workflow/scripts/tests/fixtures/transcript/00000000-aaaa-bbbb-cccc-000000000001.jsonl"
+  "transcript_path": "/synthetic/claude/projects/sample-repo/00000000-aaaa-bbbb-cccc-000000000001.jsonl"
 }

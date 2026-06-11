@@ -201,10 +201,22 @@ if [ -n "$cost_str" ]; then
   parts="${parts} $(printf '\033[0;90m%s\033[0m' "$cost_str")"
 fi
 
-# Five-hour limit
+# Rate limits (Pro/Max only; absent otherwise). 5h = rolling burst window,
+# 7d = weekly quota — color the weekly one since it's the scarce budget:
+# green <=50%, yellow 51-80%, red >80%.
 if [ -n "$five_hr_pct" ]; then
   five_int=$(printf '%.0f' "$five_hr_pct")
   parts="${parts} $(printf '\033[0;90m5h:%s%%\033[0m' "$five_int")"
+fi
+if [ -n "$seven_day_pct" ]; then
+  seven_int=$(printf '%.0f' "$seven_day_pct")
+  wk_color=$(echo "$seven_day_pct" | awk '{
+    v = $1 + 0
+    if (v > 80)      printf "\033[0;31m"
+    else if (v > 50) printf "\033[0;33m"
+    else             printf "\033[0;32m"
+  }')
+  parts="${parts} $(printf "${wk_color}wk:%s%%\033[0m" "$seven_int")"
 fi
 
 # Write a lightweight heartbeat so a separate dashboard can aggregate all open

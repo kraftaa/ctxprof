@@ -214,6 +214,9 @@ def load_steps(status: dict[str, Any] | None, state_dir: Path) -> list[dict[str,
 CACHE_WARM_THRESHOLD = 5000
 # Cache write delta (tokens) below which a turn is too small to flag at all.
 CACHE_WRITE_FLOOR = 2000
+# A Read result smaller than this (chars) is too cheap to bother flagging as
+# "loaded but unused" even if its path never recurs.
+DEAD_MIN_CHARS = 2000
 
 
 def analyze_steps(steps: list[dict[str, Any]]) -> dict[str, Any]:
@@ -299,6 +302,14 @@ def analyze(rows: list[dict[str, Any]], status: dict[str, Any] | None, steps: li
     text_blocks = 0
     tool_results = 0
     tool_uses = 0
+    # Dead-context tracking. Stamp every block with a monotonic position, record
+    # each Read result, and record every later "reference surface" (assistant
+    # text, thinking, non-Read tool inputs). A file whose path never recurs after
+    # its read is flagged as loaded-but-unused. Tool *results* are excluded: a
+    # path showing up in a grep dump or file body is I/O, not the model using it.
+    reads: dict[str, dict[str, Any]] = {}
+    ref_events: list[tuple[int, str]] = []
+    pos = 0
 
     for row in rows:
         message = row.get("message") if isinstance(row.get("message"), dict) else {}
@@ -312,6 +323,8 @@ def analyze(rows: list[dict[str, Any]], status: dict[str, Any] | None, steps: li
             category_chars[f"{role} text"] += size
             if role == "user" and size >= 4000 and LOG_HINT.search(content):
                 large_user_logs.append((size, shorten(content, 100)))
+            ref_events.append((pos, content.lower()))
+            pos += 1
             continue
 
         if not isinstance(content, list):
@@ -325,6 +338,8 @@ def analyze(rows: list[dict[str, Any]], status: dict[str, Any] | None, steps: li
         for block in content:
             if not isinstance(block, dict):
                 continue
+            block_pos = pos
+            pos += 1
             block_type = block.get("type")
             if block_type == "text":
                 text = content_text(block.get("text"))
@@ -332,9 +347,11 @@ def analyze(rows: list[dict[str, Any]], status: dict[str, Any] | None, steps: li
                 text_blocks += 1
                 role_chars[role] += size
                 category_chars[f"{role} text"] += size
+                ref_events.append((block_pos, text.lower()))
             elif block_type == "thinking":
                 text = content_text(block.get("thinking") or block.get("text"))
                 category_chars["assistant thinking"] += len(text)
+                ref_events.append((block_pos, text.lower()))
             elif block_type == "tool_use":
                 tool_uses += 1
                 tool_id = str(block.get("id") or "")
@@ -347,8 +364,12 @@ def analyze(rows: list[dict[str, Any]], status: dict[str, Any] | None, steps: li
                 category_chars["tool call inputs"] += input_size
                 if name == "Read":
                     read_counts[label] += 1
-                elif name in {"Bash", "Shell"}:
-                    command_counts[label] += 1
+                else:
+                    # A non-Read tool acting on a path (Edit/Write/Bash/Grep/Glob/…)
+                    # counts as the model *using* that file.
+                    ref_events.append((block_pos, content_text(input_data).lower()))
+                    if name in {"Bash", "Shell"}:
+                        command_counts[label] += 1
             elif block_type == "tool_result":
                 tool_results += 1
                 tool_id = str(block.get("tool_use_id") or "")
@@ -365,6 +386,9 @@ def analyze(rows: list[dict[str, Any]], status: dict[str, Any] | None, steps: li
                 duplicate_hashes[digest]["count"] += 1
                 if call.name == "Read":
                     read_chars[call.label] += size
+                    entry = reads.setdefault(call.label, {"positions": [], "chars": 0})
+                    entry["positions"].append(block_pos)
+                    entry["chars"] += size
                 elif call.name in {"Bash", "Shell"}:
                     command_chars[call.label] += size
                 elif call.name == "Agent":
@@ -396,6 +420,27 @@ def analyze(rows: list[dict[str, Any]], status: dict[str, Any] | None, steps: li
     large_user_logs.sort(reverse=True)
     agent_reports.sort(reverse=True)
 
+    # Dead context: a Read whose file path never reappears in a later reference
+    # surface (and that wasn't re-read). Lower bound — the model can use file
+    # *content* without ever naming the path, so this under-reports, never over-.
+    dead_context: list[tuple[int, str]] = []
+    for path, info in reads.items():
+        chars = info["chars"]
+        if chars < DEAD_MIN_CHARS:
+            continue
+        positions = info["positions"]
+        first = min(positions)
+        reread = max(positions) > first
+        path_l = path.lower()
+        base_l = os.path.basename(path).lower()
+        used = reread or any(
+            p > first and (path_l in text or (base_l and base_l in text))
+            for p, text in ref_events
+        )
+        if not used:
+            dead_context.append((chars, path))
+    dead_context.sort(reverse=True)
+
     step_analysis = analyze_steps(steps)
 
     total_chars = sum(category_chars.values())
@@ -407,6 +452,7 @@ def analyze(rows: list[dict[str, Any]], status: dict[str, Any] | None, steps: li
         "tool_input_chars": tool_input_chars,
         "repeated_reads": repeated_reads,
         "repeated_commands": repeated_commands,
+        "dead_context": dead_context,
         "duplicate_waste": duplicate_waste,
         "large_results": large_results,
         "large_user_logs": large_user_logs,
@@ -477,6 +523,15 @@ def print_report(transcript: Path, analysis: dict[str, Any], limit: int) -> None
             print(f"- {count}x {path}: ~{compact_int(est_tokens(chars))} result tok")
     else:
         print("- none detected")
+
+    print("\nLoaded but never referenced again (heuristic — a file's path never reappears after it was read; lower bound, since content can be used without naming the path):")
+    if analysis["dead_context"]:
+        dead_total = sum(chars for chars, _ in analysis["dead_context"])
+        print(f"- total: ~{compact_int(est_tokens(dead_total))} tok across {len(analysis['dead_context'])} read(s)")
+        for chars, path in analysis["dead_context"][:limit]:
+            print(f"- {path}: ~{compact_int(est_tokens(chars))} tok")
+    else:
+        print("- none over threshold")
 
     print("\nRepeated commands:")
     if analysis["repeated_commands"]:
@@ -559,6 +614,8 @@ def build_recommendations(analysis: dict[str, Any]) -> list[str]:
     recommendations: list[str] = []
     if analysis["repeated_reads"]:
         recommendations.append("Replace repeated full file reads with targeted line ranges or a short working summary.")
+    if analysis["dead_context"]:
+        recommendations.append("Some files were read but their path never came up again — avoid reading files you won't act on, or read targeted ranges instead of whole files.")
     if analysis["duplicate_waste"]:
         recommendations.append("Avoid re-running commands that return identical large output; summarize once and refer back.")
     if analysis["large_results"]:
@@ -621,6 +678,10 @@ def build_payload(transcript: Path, analysis: dict[str, Any], limit: int) -> dic
         "repeated_commands": [
             {"count": count, "result_est_tokens": est_tokens(chars), "label": cmd}
             for count, chars, cmd in analysis["repeated_commands"][:limit]
+        ],
+        "dead_context": [
+            {"label": path, "est_tokens": est_tokens(chars)}
+            for chars, path in analysis["dead_context"][:limit]
         ],
         "duplicate_blobs": [
             {

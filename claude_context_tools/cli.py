@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from . import __version__, audit, dashboard, install
+from . import __version__, audit, dashboard, guard, install
 
 USAGE = """ctx — Claude Code context & cache tools
 
@@ -19,6 +19,8 @@ Usage:
   ctx tui [--limit N]                             interactive step browser
   ctx audit [--latest|--session ID|--transcript P] [--json]
                                                   offline "why did it burn?" analyzer
+  ctx guard [--latest|--session ID|--transcript P] [--json] [--strict]
+                                                  scan a session for secrets & dangerous commands
   ctx statusline                                  heartbeat statusline (reads stdin)
   ctx install [--statusline] [--force]            wire the heartbeat statusline
   ctx version
@@ -38,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
         return dashboard.main([cmd, *rest])
     if cmd == "audit":
         return audit.main(rest)
+    if cmd == "guard":
+        return guard.main(rest)
     if cmd == "install":
         return install.main(rest)
     if cmd in ("version", "--version", "-V"):
