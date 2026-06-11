@@ -46,7 +46,7 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     ("Bearer token", re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._\-]{20,})"), "MED"),
     ("generic secret assignment", re.compile(
         r"(?i)\b(?:api[_-]?key|secret|access[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret)\b"
-        r"\s*[:=]\s*['\"]?([^\s'\"]{12,})"
+        r"\s*[:=]\s*['\"]?([^\s'\";&|<>(){}\[\]]{12,})"
     ), "MED"),
 ]
 
@@ -67,13 +67,16 @@ SENSITIVE_FILES: list[tuple[str, re.Pattern[str], str]] = [
     ("secrets file", re.compile(r"(?:^|/)secrets?(?:\.[\w.-]+)?$", re.I), "MED"),
 ]
 
+# Match `rm` recursive+force flags in any order/case: -rf, -fr, -Rf, -rfv, etc.
+_RM_FLAGS = r"-[a-zA-Z]*(?:[rR][a-zA-Z]*[fF]|[fF][a-zA-Z]*[rR])[a-zA-Z]*"
+
 # Dangerous shell commands: (label, regex, severity, hint).
 DANGEROUS_CMDS: list[tuple[str, re.Pattern[str], str, str]] = [
-    ("pipe remote script to shell", re.compile(r"(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z|d)?sh\b"), "HIGH",
+    ("pipe remote script to shell", re.compile(r"(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:bash|zsh|dash|ash|sh)\b"), "HIGH",
      "Downloads and executes a remote script unverified."),
-    ("recursive force remove of root/home", re.compile(r"\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+(?:--\s+)?(?:/|~|\$HOME|\*)(?:\s|/|$)"), "HIGH",
+    ("recursive force remove of root/home", re.compile(r"\brm\s+" + _RM_FLAGS + r"\s+(?:--\s+)?(?:/|~|\$HOME|\*)(?:\s|/|$)"), "HIGH",
      "Recursive force-delete targeting / or home."),
-    ("recursive force remove", re.compile(r"\brm\s+-[a-z]*r[a-z]*f"), "MED",
+    ("recursive force remove", re.compile(r"\brm\s+" + _RM_FLAGS), "MED",
      "Recursive force-delete; verify the target path."),
     ("fork bomb", re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"), "HIGH",
      "Classic fork bomb."),
@@ -125,17 +128,32 @@ INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 
 def redact(secret: str) -> str:
-    """Mask a secret so the report can't leak it: prefix + length + fingerprint."""
+    """Mask a secret so the report can't leak it: length + fingerprint only.
+
+    No prefix is emitted — for format-prefixed keys (AKIA…, ghp_…) it would be
+    constant and useless, and for generic password/token values it would leak the
+    first real characters. The sha1 still lets identical secrets dedupe/correlate.
+    """
     s = secret.strip()
-    head = s[:3]
-    return f"{head}… (len {len(s)}, sha1:{sha(s)[:8]})"
+    return f"«secret» (len {len(s)}, sha1:{sha(s)[:8]})"
 
 
 def redact_secrets_in(text: str) -> str:
-    """Replace any embedded secret in free text (e.g. a command) with its redaction."""
+    """Replace any embedded secret in free text (e.g. a command) with its redaction.
+
+    When a pattern captures only the value in group 1, only that span is masked, so
+    the surrounding context (e.g. the `API_KEY=` keyword) is preserved for triage.
+    """
+    def _mask(match: re.Match[str]) -> str:
+        if match.groups() and match.group(1) is not None:
+            whole, start = match.group(0), match.start()
+            g0, g1 = match.start(1) - start, match.end(1) - start
+            return whole[:g0] + redact(match.group(1)) + whole[g1:]
+        return redact(match.group(0))
+
     out = text
     for _label, rx, _sev in SECRET_PATTERNS:
-        out = rx.sub(lambda m: redact(m.group(1) if m.groups() else m.group(0)), out)
+        out = rx.sub(_mask, out)
     return out
 
 
@@ -253,7 +271,9 @@ def scan_taint(rows: list[dict[str, Any]], roots: list[str]) -> list[dict[str, A
                 path = str(inp.get("file_path") or inp.get("path") or "")
                 if path and _is_external(path, roots):
                     pending = {"turn": turn, "source": "read outside repo", "detail": shorten(path, 60)}
-            elif pending and 0 < turn - pending["turn"] <= TAINT_WINDOW:
+            elif pending and 0 <= turn - pending["turn"] <= TAINT_WINDOW:
+                # delta 0 = source and sink in the same message (parallel tool calls)
+                # — the tightest, highest-confidence fetch-then-execute pattern.
                 if name in SINK_SHELL:
                     sev, act = "MED", "shell command"
                 elif name in SINK_EDIT:
@@ -298,7 +318,10 @@ def scan_injection(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 tool_names[str(block.get("id") or "")] = str(block.get("name") or "")
             elif block.get("type") == "tool_result":
                 source = tool_names.get(str(block.get("tool_use_id") or ""), "")
-                if source and source not in INGEST_TOOLS:
+                # Allowlist: only scan results we can positively attribute to an
+                # ingest tool. An unresolvable id (e.g. tool_use in an earlier
+                # transcript slice) is skipped rather than scanned by default.
+                if source not in INGEST_TOOLS:
                     continue
                 text = content_text(block.get("content"))
                 if not text:
