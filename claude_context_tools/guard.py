@@ -98,6 +98,31 @@ WEB_TOOLS = {"WebFetch", "WebSearch"}
 SINK_SHELL = {"Bash", "Shell"}
 SINK_EDIT = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
+# Prompt-injection / jailbreak phrases. Scanned only in *ingested* content (tool
+# results — files read, pages fetched, command output), never the user's own
+# messages or the assistant's text. High-signal imperative patterns only, all LOW
+# severity: these legitimately appear in security docs and prompt-engineering
+# content, so treat hits as leads, not proof. Source tools whose results are
+# ingested external content:
+INGEST_TOOLS = {"Read", "WebFetch", "WebSearch", "Bash", "Shell", "Grep", "Glob", "Task", "Agent"}
+INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("ignore previous instructions", re.compile(
+        r"(?i)\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+|the\s+|your\s+)*"
+        r"(?:previous|prior|above|earlier|preceding|initial|original)\s+"
+        r"(?:instructions?|prompts?|messages?|directions?|context|rules?)")),
+    ("override/leak system prompt", re.compile(
+        r"(?i)\b(?:override|bypass|ignore|reveal|print|show|leak|repeat|exfiltrate|disclose)\s+"
+        r"(?:your|the|my|all)?\s*(?:system\s+)?(?:prompt|instructions?|guidelines?|rules?)")),
+    ("role reassignment", re.compile(
+        r"(?i)\b(?:you\s+are\s+now|from\s+now\s+on,?\s+you|act\s+as|pretend\s+(?:to\s+be|you(?:'re|\s+are)))\b")),
+    ("hidden-from-user directive", re.compile(
+        r"(?i)\bdo\s+not\s+(?:tell|inform|mention|reveal|notify|alert)\s+(?:the\s+|to\s+the\s+)?(?:user|operator|human|developer)")),
+    ("model control tokens in data", re.compile(
+        r"<\|im_start\|>|<\|im_end\|>|\[/?INST\]|<<SYS>>|</?system>")),
+    ("jailbreak / developer mode", re.compile(
+        r"(?i)\b(?:developer\s+mode|jailbreak|DAN\s+mode|do\s+anything\s+now)\b")),
+]
+
 
 def redact(secret: str) -> str:
     """Mask a secret so the report can't leak it: prefix + length + fingerprint."""
@@ -244,6 +269,57 @@ def scan_taint(rows: list[dict[str, Any]], roots: list[str]) -> list[dict[str, A
     return findings
 
 
+def scan_injection(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flag prompt-injection / jailbreak phrases in *ingested* content only.
+
+    Only tool results from content-bearing tools (file reads, web fetches, command
+    output) are scanned — not the user's own messages or the assistant's text, since
+    those aren't an injection surface. All findings are LOW and deduped by phrase, as
+    these patterns occur in legitimate security/prompt-engineering material.
+    """
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    tool_names: dict[str, str] = {}
+    turn = 0
+    for row in rows:
+        turn += 1
+        message = row.get("message") if isinstance(row.get("message"), dict) else {}
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_names[str(block.get("id") or "")] = str(block.get("name") or "")
+            elif block.get("type") == "tool_result":
+                source = tool_names.get(str(block.get("tool_use_id") or ""), "")
+                if source and source not in INGEST_TOOLS:
+                    continue
+                text = content_text(block.get("content"))
+                if not text:
+                    continue
+                for label, rx in INJECTION_PATTERNS:
+                    match = rx.search(text)
+                    if not match:
+                        continue
+                    snippet = shorten(match.group(0), 80)
+                    key = (label, sha(snippet.lower()))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    findings.append({
+                        "severity": "LOW",
+                        "kind": "injection",
+                        "title": f"possible prompt injection: {label}",
+                        "evidence": f'"{snippet}"  (in {source or "tool"} result)',
+                        "hint": "This phrase entered context from ingested content — verify it isn't steering the model.",
+                        "where": f"turn {turn}",
+                        "count": 1,
+                    })
+    return findings
+
+
 def scan(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     seen: dict[tuple[str, str], dict[str, Any]] = {}
@@ -321,8 +397,9 @@ def build_payload(transcript: Path, status: dict[str, Any] | None, findings: lis
         "disclaimer": (
             "Heuristic, redacted. Secret values are never emitted — only a prefix, length, and sha1 "
             "fingerprint. Scans context that entered this session: known-format secrets, sensitive file "
-            "reads, dangerous shell commands, and potential taint (untrusted input shortly before a "
-            "shell/edit action — low/medium confidence, not proof of influence)."
+            "reads, dangerous shell commands, potential taint (untrusted input shortly before a "
+            "shell/edit action), and prompt-injection phrases in ingested content — the last two are "
+            "low confidence (correlation/heuristic, not proof)."
         ),
         "transcript": str(transcript),
         "repo": (status or {}).get("repo"),
@@ -360,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         for key in ("project_dir", "cwd")
         if status and status.get(key)
     ]
-    findings = scan(rows) + scan_taint(rows, roots)
+    findings = scan(rows) + scan_taint(rows, roots) + scan_injection(rows)
     findings.sort(key=_sort_key)
     limit = max(1, args.limit)
 

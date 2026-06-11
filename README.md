@@ -249,6 +249,10 @@ at what actually crossed into *this conversation*:
 - **Potential taint** — untrusted content (a `WebFetch`/`WebSearch`, or a file read
   *outside* the repo) followed within a few turns by a shell command or file edit.
   Low/medium confidence by design (see limits).
+- **Prompt-injection phrases** — jailbreak/override phrases ("ignore previous
+  instructions", role reassignment, model control tokens, "do not tell the user")
+  found in **ingested** content only (tool results — files read, pages fetched,
+  command output), never the user's own messages. LOW severity, deduped.
 
 ### Honest limits
 
@@ -265,8 +269,12 @@ at what actually crossed into *this conversation*:
   are LOW/MED and show the turn distance, as leads to review. Reads are treated as
   untrusted only when the repo root is known; otherwise taint stays silent on reads
   rather than guess.
-- **Not yet covered:** MCP tool-risk (needs config, not the transcript) and
-  prompt-injection phrase detection.
+- **Injection detection is intentionally noisy and LOW.** These phrases occur in
+  legitimate security docs and prompt-engineering material (including this repo's
+  own `guard.py`), so a hit means "a human should glance at this," not "you were
+  attacked." It scans ingested content only, and dedupes repeats.
+- **Not yet covered:** MCP tool-risk — needs the MCP/settings config, not the
+  transcript, so it's a separate data source.
 
 ## What `ctx compare` reports
 
