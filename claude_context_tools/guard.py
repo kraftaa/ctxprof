@@ -211,12 +211,16 @@ def _sort_key(finding: dict[str, Any]) -> tuple[int, str, str]:
 
 
 def _is_external(path: str, roots: list[str]) -> bool:
-    """True if an absolute path falls outside every known repo/cwd root."""
+    """True if an absolute path falls outside every known repo/cwd root.
+
+    Compares on path boundaries (root, or root + os.sep) so that e.g. ``/repo`` does
+    not spuriously contain ``/repo-other`` or ``/repository``.
+    """
     try:
         resolved = os.path.abspath(os.path.expanduser(path))
     except (OSError, ValueError):
         return False
-    return not any(resolved.startswith(root) for root in roots)
+    return not any(resolved == root or resolved.startswith(root + os.sep) for root in roots)
 
 
 def scan_taint(rows: list[dict[str, Any]], roots: list[str]) -> list[dict[str, Any]]:
