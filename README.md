@@ -55,8 +55,8 @@ pip install -e .
 
 This installs one command, `ctx`, an umbrella with subcommands:
 `dashboard`, `watch`, `explain`, `show`, `steps`, `digest`, `compare`, `rates`,
-`audit`, `guard`, `tui`, `install` (plus `statusline`/`hook` plumbing). Run `ctx`
-with no arguments to see them all.
+`audit`, `guard`, `attack-path`, `tui`, `install` (plus `statusline`/`hook`
+plumbing). Run `ctx` with no arguments to see them all.
 
 No clone needed after install. To run without installing, use
 `python3 -m claude_context_tools.cli <subcommand>` from this directory.
@@ -73,6 +73,7 @@ No clone needed after install. To run without installing, use
 | See **per-turn** costs / catch a spike as it happens | `ctx steps` |
 | **Deep offline** breakdown of one session's transcript | `ctx audit <id>` |
 | Scan a session for **secrets in context / dangerous commands** | `ctx guard <id>` |
+| See **which MCP servers are risky** / the **attack surface** | `ctx guard --mcp` · `ctx attack-path` |
 | Check **prices / keep-warm-vs-rebuild** math | `ctx rates` |
 
 Typical flow: **`ctx digest`** to see which session is costing the most →
@@ -168,6 +169,8 @@ ctx audit --latest --json        # machine-readable
 ctx guard --latest
 ctx guard --session <session-id> --json
 ctx guard --latest --strict      # exit non-zero if anything is found (CI gating)
+ctx guard --latest --mcp         # MCP server risk surface (catalog + observed)
+ctx attack-path --latest         # potential injection→action→exfil reachability
 ```
 
 ## Turn on the heartbeat (one-time)
@@ -273,8 +276,20 @@ at what actually crossed into *this conversation*:
   legitimate security docs and prompt-engineering material (including this repo's
   own `guard.py`), so a hit means "a human should glance at this," not "you were
   attacked." It scans ingested content only, and dedupes repeats.
-- **Not yet covered:** MCP tool-risk — needs the MCP/settings config, not the
-  transcript, so it's a separate data source.
+
+### MCP risk + attack path
+
+- **`ctx guard --mcp`** — the MCP server risk surface. Servers come from
+  `~/.claude.json` (user + project scope) and `.mcp.json`; capabilities are
+  reported on two clearly-labelled bases: **`[catalog]`** (what a *known* server can
+  do — an assumption from a built-in list) and **`[observed]`** (classified from the
+  `mcp__server__tool` calls actually made this session). A server that's neither
+  known nor used reports risk **`unknown`**, never a guessed score. Remote/claude.ai
+  connectors not in local config still appear if their tools were called.
+- **`ctx attack-path`** — chains the detected signals (injection → untrusted input →
+  capable MCP → shell use → credentials in context) into a *potential reachability*
+  surface with an overall HIGH/MED/LOW. Every node is a real detection from the
+  lenses above; it is a **surface map, not proof of an exploit**.
 
 ## What `ctx compare` reports
 

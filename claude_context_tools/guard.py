@@ -447,6 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=20, help="max findings to print")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of the text report")
     parser.add_argument("--strict", action="store_true", help="exit non-zero if any finding is reported (for CI gating)")
+    parser.add_argument("--mcp", action="store_true", help="report MCP server risk surface instead of scanning content")
     args = parser.parse_args(argv)
 
     state_dir = Path(args.state_dir).expanduser()
@@ -459,6 +460,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"transcript does not exist: {transcript}")
 
     rows = read_jsonl(transcript)
+    if args.mcp:
+        from . import mcp_risk
+        print(mcp_risk.render_mcp(rows, status, args.json))
+        return 0
     roots = [
         os.path.abspath(os.path.expanduser(str(status[key])))
         for key in ("project_dir", "cwd")
