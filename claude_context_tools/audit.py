@@ -479,6 +479,43 @@ def print_top_counter(title: str, counter: Counter[str], total: int, limit: int)
         print(f"- {name}: ~{compact_int(est_tokens(chars))} tok ({pct(chars, total)})")
 
 
+def token_calibration(analysis: dict[str, Any], status: dict[str, Any] | None) -> dict[str, Any]:
+    """Measure the real chars/token ratio from output, to ground the estimate.
+
+    Only the *output* side is cache-free and cleanly comparable: output tokens are
+    exact (never re-counted like cached input), and the assistant-generated chars
+    (text + thinking + tool-call inputs) are exactly that content. A session-level
+    measured ratio anchors the default ~4-chars/token guess in reality. (It reflects
+    generated prose/JSON; input like code or logs tokenizes somewhat differently.)
+    """
+    cats = analysis.get("category_chars") or {}
+    output_chars = (cats.get("assistant text", 0) + cats.get("assistant thinking", 0)
+                    + cats.get("tool call inputs", 0))
+    totals = analysis.get("step_totals") or {}
+    output_tokens = number(totals.get("output")) if totals else 0.0
+    if not output_tokens and status:
+        output_tokens = number(status.get("output_tokens"))
+    measured = (output_chars / output_tokens) if output_tokens > 0 else None
+    # Real text tokenizes to ~2-6 chars/token. A ratio far below that means the
+    # output-token count includes generation NOT in this transcript — subagents
+    # (their internal turns bill output tokens but only the final report is stored)
+    # or redacted extended thinking. In that case the measurement is confounded and
+    # we say so rather than print a misleading number.
+    reliable = measured is not None and 1.5 <= measured <= 8.0
+    note = None
+    if measured is not None and not reliable:
+        note = ("output tokens include generation not in this transcript "
+                "(subagents and/or redacted thinking) — per-session calibration unreliable here")
+    return {
+        "output_chars": output_chars,
+        "output_tokens": output_tokens,
+        "measured_chars_per_token": measured,
+        "default_chars_per_token": 4 / TOKENIZER_FACTOR,
+        "reliable": reliable,
+        "note": note,
+    }
+
+
 def print_report(transcript: Path, analysis: dict[str, Any], limit: int) -> None:
     status = analysis["status"] or {}
     total_chars = analysis["total_chars"]
@@ -491,6 +528,17 @@ def print_report(transcript: Path, analysis: dict[str, Any], limit: int) -> None
     print(f"Repo: {repo}  Session: {session_id}")
     factor_note = f" (~{4 / TOKENIZER_FACTOR:.1f} chars/tok, ×{TOKENIZER_FACTOR:g} for this model's tokenizer)" if TOKENIZER_FACTOR != 1.0 else " (~4 chars/tok, rough)"
     print(f"Transcript payload estimate: ~{compact_int(total_est)} tokens from {compact_int(total_chars)} chars{factor_note}")
+    cal = token_calibration(analysis, status)
+    if cal["reliable"]:
+        print(
+            f"Token estimate calibration: default {cal['default_chars_per_token']:.2f} chars/tok; "
+            f"measured {cal['measured_chars_per_token']:.2f} chars/tok "
+            f"(generated {compact_int(cal['output_chars'])} chars ÷ {compact_int(cal['output_tokens'])} output tok)"
+        )
+    elif cal["note"]:
+        print(f"Token estimate calibration: unavailable — {cal['note']}")
+    else:
+        print("Token estimate calibration: no output-token data (needs step file or heartbeat); using the default")
     if status:
         print(
             "Live/session totals: "
@@ -655,6 +703,7 @@ def build_payload(transcript: Path, analysis: dict[str, Any], limit: int) -> dic
         "transcript_payload_est_tokens": est_tokens(total_chars),
         "transcript_payload_chars": total_chars,
         "tokenizer_factor": TOKENIZER_FACTOR,
+        "token_calibration": token_calibration(analysis, status),
         "session_totals": {
             "context_pct": status.get("context_pct") if status else None,
             "total_tokens": status.get("total_tokens") if status else None,

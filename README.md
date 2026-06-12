@@ -229,6 +229,11 @@ and these tools will read it. To wire it by hand instead:
   model's tokenizer — ×1.35 for Opus 4.7+; override with `--token-factor`). The
   live per-turn numbers (statusline, `ctx steps`, COST) are Claude Code's own
   exact usage fields, not estimates.
+- **Calibration.** `ctx audit` measures the real chars/token ratio from the
+  cache-free output side (generated chars ÷ output tokens) and prints it next to
+  the default. When the session used **subagents** (their output bills tokens but
+  isn't in the transcript) or redacted thinking, the ratio is confounded — so it
+  says *unavailable* and why, rather than print a misleading number.
 - Cache analysis is **heuristic and token-level** — the heartbeat exposes per-turn
   token *counts*, not cache-block boundaries, so it flags *likely* invalidation,
   not exact cache-block attribution.

@@ -383,6 +383,29 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(rc_plain, 0)   # same findings, no --strict -> zero
 
 
+class TokenCalibrationTests(unittest.TestCase):
+    def _cal(self, chars, output_tokens):
+        from collections import Counter
+        analysis = {"category_chars": Counter({"assistant text": chars}),
+                    "step_totals": Counter({"output": output_tokens})}
+        return audit.token_calibration(analysis, None)
+
+    def test_plausible_ratio_is_reliable(self):
+        cal = self._cal(40000, 12000)  # 3.33 chars/tok — real text
+        self.assertTrue(cal["reliable"])
+        self.assertAlmostEqual(cal["measured_chars_per_token"], 40000 / 12000, places=4)
+
+    def test_subagent_confound_is_flagged_unreliable(self):
+        cal = self._cal(50000, 57000)  # 0.88 chars/tok — impossible for real text
+        self.assertFalse(cal["reliable"])
+        self.assertIsNotNone(cal["note"])
+
+    def test_no_output_tokens_yields_none(self):
+        cal = self._cal(40000, 0)
+        self.assertIsNone(cal["measured_chars_per_token"])
+        self.assertFalse(cal["reliable"])
+
+
 class CacheClassificationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
