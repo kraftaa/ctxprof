@@ -10,6 +10,7 @@ USAGE = """ctx — Claude Code context & cache tools
 
 Usage:
   ctx dashboard [--refresh N] [--include-stale]   live multi-session monitor
+  ctx sessions [--include-stale] [--json]         list sessions for picking an id
   ctx show [SESSION]                              one session + audit command
   ctx watch [SESSION]                             live single-session panel + advice
   ctx explain [SESSION]                           root-cause why a session got expensive
@@ -38,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cmd, rest = argv[0], argv[1:]
-    if cmd in ("dashboard", "show", "statusline", "steps", "digest", "compare", "tui", "watch", "hook", "rates", "explain"):
+    if cmd in ("dashboard", "sessions", "show", "statusline", "steps", "digest", "compare", "tui", "watch", "hook", "rates", "explain"):
         return dashboard.main([cmd, *rest])
     if cmd == "audit":
         return audit.main(rest)

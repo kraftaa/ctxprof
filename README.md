@@ -6,6 +6,8 @@ goes. Like a CPU/memory profiler, but for tokens. Several lenses:
 
 - **Live** — `ctx dashboard` (all sessions) / `ctx watch` (one session): how much,
   right now.
+- **Inventory** — `ctx sessions`: pick the right session id before running
+  `show`, `watch`, `explain`, `audit`, or `guard`.
 - **Per-turn** — `ctx steps` / `ctx digest` / `ctx rates`: what each turn cost and
   where the money went.
 - **Cross-session** — `ctx compare`: cache-reuse quality across many sessions
@@ -54,7 +56,7 @@ pip install -e .
 ```
 
 This installs one command, `ctx`, an umbrella with subcommands:
-`dashboard`, `watch`, `explain`, `show`, `steps`, `digest`, `compare`, `rates`,
+`dashboard`, `sessions`, `watch`, `explain`, `show`, `steps`, `digest`, `compare`, `rates`,
 `audit`, `guard`, `attack-path`, `tui`, `install` (plus `statusline`/`hook`
 plumbing). Run `ctx` with no arguments to see them all.
 
@@ -66,6 +68,7 @@ No clone needed after install. To run without installing, use
 | I want to… | Run |
 |---|---|
 | See what all my open sessions cost **right now** | `ctx dashboard` |
+| Pick the **right session id** before drilling in | `ctx sessions` |
 | Find **which session is the money sink** | `ctx digest` (ranks sessions by cost) |
 | Compare **cache reuse / waste across many sessions** | `ctx compare --since 30d` |
 | Know **why a session got expensive + how to fix it** | `ctx explain <id>` |
@@ -79,10 +82,56 @@ No clone needed after install. To run without installing, use
 Typical flow: **`ctx digest`** to see which session is costing the most →
 **`ctx explain <id>`** on that one to see the avoidable costs and the fix.
 
+## What ctxprof does not try to solve
+
+`ctxprof` is a **context/cache profiler**, not a full agent-judgment engine. It
+shows what entered context, what repeated, what rebuilt cache, and what it cost.
+
+A higher-level analyzer could consume `ctxprof`'s signals to answer different
+questions: whether the agent strategy made sense, whether it looped, and whether
+the session achieved the user's objective:
+
+- **Decision analysis** — why did Claude read 70 files, run `pytest` 12 times,
+  or choose one tool instead of another? Which actions were evidence-gathering,
+  which were implementation, and which were avoidable churn?
+- **Agent loop detection** — recognize repeated action sequences such as:
+
+  ```text
+  read A
+  grep B
+  pytest
+
+  read A
+  grep B
+  pytest
+
+  read A
+  grep B
+  pytest
+  ```
+
+  and flag them as cycles rather than just reporting each read or test run as an
+  isolated cost.
+- **Goal completion analysis** — summarize the session as work against an
+  objective, for example:
+
+  ```text
+  Task: Fix failing test
+  Time: 25 min
+  Useful work: 2 edits
+  Exploration: 85%
+  Result: test still failing
+  ```
+
+These questions are deliberately outside `ctxprof`'s scope. The profiler supplies
+the observability signals: tool calls, read/grep/test repetition, per-turn costs,
+cache behavior, and transcript evidence. A decision/goal analyzer would use those
+signals to judge strategy, progress, loops, and outcome quality.
+
 **Which session do the single-session commands act on?** With no id they pick the
 **newest** (most recently active) session, and the **header line shows its name**
 so you can confirm. To target another, pass a **session id or prefix** — get the
-ids from `ctx dashboard` (the `ID` column) and run `ctx show <id>` to see a
+ids from `ctx sessions` (or the `ID` column in `ctx dashboard`) and run `ctx show <id>` to see a
 session's repo/cwd. No time window: `ctx explain`/`audit` cover the **whole
 session**; `ctx digest --since 2h` and `ctx steps --limit N` are the windowed ones.
 
@@ -97,6 +146,11 @@ ctx dashboard --refresh 0
 
 # Include sessions idle past the stale timeout (shown dimmed, with `!`):
 ctx dashboard --include-stale
+
+# List sessions for choosing a target id:
+ctx sessions
+ctx sessions --include-stale
+ctx sessions --json
 
 # Details + a ready-to-run audit command for one session (or the newest):
 ctx show

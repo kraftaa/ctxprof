@@ -488,6 +488,21 @@ class EndToEndCliTests(unittest.TestCase):
                          env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR), "COLUMNS": "200"})
         self.assertIn("sample-repo", proc.stdout)
 
+    def test_sessions_cli(self):
+        proc = self._run(["sessions", "--include-stale"],
+                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        self.assertIn("Sessions", proc.stdout)
+        self.assertIn(SESSION[:12], proc.stdout)
+        self.assertIn("ctx show <id>", proc.stdout)
+
+    def test_sessions_json_cli(self):
+        proc = self._run(["sessions", "--include-stale", "--json"],
+                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["schema"], "claude-context-sessions/1")
+        self.assertEqual(payload["sessions"][0]["session_id"], SESSION)
+        self.assertIn("transcript_path", payload["sessions"][0])
+
     def test_steps_cli(self):
         proc = self._run(["steps", "--limit", "5"],
                          env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR), "COLUMNS": "160"})

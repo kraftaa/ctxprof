@@ -505,6 +505,89 @@ def render_table(include_stale: bool = False) -> str:
     return "\n".join(lines)
 
 
+SESSION_COLUMNS = [
+    ("seen", "SEEN", 5, "r"),
+    ("id", "ID", 12, "l"),
+    ("repo", "REPO", 22, "l"),
+    ("ctx", "CTX", 5, "r"),
+    ("tokens", "TOKENS", 8, "r"),
+    ("cache", "CACHE R/W", 11, "r"),
+    ("cost", "COST", 8, "r"),
+    ("model", "MODEL", 18, "l"),
+    ("label", "LABEL", 36, "l"),
+]
+
+
+def session_view(record: dict[str, Any], now: float) -> dict[str, Any]:
+    """Stable session inventory row for `ctx sessions --json` and text output."""
+    seconds_since = now - number(record.get("updated_at"))
+    sid = str(record.get("session_id") or "-")
+    return {
+        "session_id": sid,
+        "id": sid[:12],
+        "repo": record.get("repo") or "-",
+        "label": record.get("session_name") or "",
+        "model": record.get("model") or "-",
+        "cwd": record.get("cwd") or "",
+        "project_dir": record.get("project_dir") or "",
+        "transcript_path": record.get("transcript_path") or "",
+        "updated_at": number(record.get("updated_at")),
+        "age_s": round(seconds_since, 1),
+        "stale": seconds_since > STALE_AFTER_SECONDS,
+        "context_pct": maybe_number(record.get("context_pct")),
+        "total_tokens": maybe_number(record.get("total_tokens")),
+        "input_tokens": maybe_number(record.get("input_tokens")),
+        "output_tokens": maybe_number(record.get("output_tokens")),
+        "cache_read_tokens": maybe_number(record.get("cache_read_tokens")),
+        "cache_write_tokens": maybe_number(record.get("cache_write_tokens")),
+        "cost_usd": round(number(record.get("cost_usd")), 6),
+        "duration_ms": number(record.get("duration_ms")),
+    }
+
+
+def render_sessions(include_stale: bool = False, as_json: bool = False) -> str:
+    """List heartbeat sessions in a compact form for choosing a target id."""
+    now = time.time()
+    all_records = load_records(include_stale=True)
+    rows = [session_view(r, now) for r in all_records]
+    if not include_stale:
+        rows = [r for r in rows if not r["stale"]]
+    if as_json:
+        return json.dumps({"schema": "claude-context-sessions/1", "sessions": rows}, indent=2, sort_keys=True)
+
+    hidden = len(all_records) - len(rows)
+    lines = [
+        f"{TEAL}Sessions{RESET}  shown:{len(rows)}"
+        + (f"  {DIM}stale-hidden:{hidden}{RESET}" if hidden and not include_stale else ""),
+        "",
+        f"{DIM}{'  '.join(_pad(h, w, a) for _, h, w, a in SESSION_COLUMNS)}{RESET}",
+    ]
+    for row in rows:
+        ctx = row["context_pct"]
+        cells = {
+            "seen": f"{age(row['age_s'])}!" if row["stale"] else age(row["age_s"]),
+            "id": row["id"],
+            "repo": truncate(row["repo"], 22),
+            "ctx": f"{ctx:.0f}%" if ctx is not None else "-",
+            "tokens": compact_int(row["total_tokens"]),
+            "cache": f"{compact_int(row['cache_read_tokens'])}/{compact_int(row['cache_write_tokens'])}",
+            "cost": f"${row['cost_usd']:.2f}",
+            "model": truncate(row["model"], 18),
+            "label": truncate(row["label"] or "-", 36),
+        }
+        line = "  ".join(_pad(cells[k], w, a) for k, _, w, a in SESSION_COLUMNS)
+        lines.append(f"{DIM}{line}{RESET}" if row["stale"] else line)
+
+    if not rows:
+        lines.append("No sessions found. Start Claude Code with the heartbeat statusline configured.")
+    else:
+        lines.append("")
+        lines.append(f"{DIM}Use the ID with: ctx show <id>  ·  ctx explain <id>  ·  ctx watch <id>{RESET}")
+        if hidden:
+            lines.append(f"{DIM}{hidden} idle >{age(STALE_AFTER_SECONDS)} hidden (use --include-stale).{RESET}")
+    return "\n".join(lines)
+
+
 def recent_steps(limit: int) -> list[dict[str, Any]]:
     """Most recent per-turn step records across all sessions, newest first."""
     steps_dir = STATE_DIR / "steps"
@@ -1327,6 +1410,9 @@ def main(argv: list[str] | None = None) -> int:
     dash = subparsers.add_parser("dashboard", help="render all recently active Claude sessions")
     dash.add_argument("--refresh", type=float, default=1.0, help="refresh interval in seconds; 0 prints once")
     dash.add_argument("--include-stale", action="store_true", help="include sessions older than the stale timeout")
+    sessions_parser = subparsers.add_parser("sessions", help="list sessions for picking an id")
+    sessions_parser.add_argument("--include-stale", action="store_true", help="include sessions older than the stale timeout")
+    sessions_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     show_parser = subparsers.add_parser("show", help="print details + ready-to-run audit command for one session")
     show_parser.add_argument("session", nargs="?", help="session id (or prefix); omitted = newest active session")
     steps_parser = subparsers.add_parser("steps", help="recent per-turn cost feed across all sessions")
@@ -1358,6 +1444,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "dashboard":
         return dashboard(args.refresh, args.include_stale)
+    if args.command == "sessions":
+        print(render_sessions(args.include_stale, args.json))
+        return 0
     if args.command == "show":
         return show(args.session)
     if args.command == "steps":
