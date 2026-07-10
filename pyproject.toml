@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ctxprof"
-version = "0.1.0"
+version = "0.2.0"
 description = "Live dashboard and offline context/cache audit for Claude Code sessions"
 readme = "README.md"
 requires-python = ">=3.9"
