@@ -8,7 +8,7 @@ goes. Like a CPU/memory profiler, but for tokens. Several lenses:
   right now.
 - **Inventory** — `ctx sessions`: pick the right session id before running
   `show`, `watch`, `explain`, `audit`, or `guard`.
-- **Per-turn** — `ctx steps` / `ctx digest` / `ctx rates`: what each turn cost and
+- **Per-turn** — `ctx steps` / `ctx top` / `ctx digest` / `ctx rates`: what each turn cost and
   where the money went.
 - **Cross-session** — `ctx compare`: cache-reuse quality across many sessions
   (best/worst/average), aggregate idle-rebuild waste, and spend by repo over a
@@ -56,7 +56,7 @@ pip install -e .
 ```
 
 This installs one command, `ctx`, an umbrella with subcommands:
-`dashboard`, `sessions`, `watch`, `explain`, `show`, `steps`, `digest`, `compare`, `rates`,
+`dashboard`, `sessions`, `watch`, `explain`, `show`, `steps`, `top`, `digest`, `compare`, `rates`,
 `audit`, `guard`, `attack-path`, `tui`, `install` (plus `statusline`/`hook`
 plumbing). Run `ctx` with no arguments to see them all.
 
@@ -69,6 +69,7 @@ No clone needed after install. To run without installing, use
 |---|---|
 | See what all my open sessions cost **right now** | `ctx dashboard` |
 | Pick the **right session id** before drilling in | `ctx sessions` |
+| See **what is costing me recently** | `ctx top --since 30m` |
 | Find **which session is the money sink** | `ctx digest` (ranks sessions by cost) |
 | Compare **cache reuse / waste across many sessions** | `ctx compare --since 30d` |
 | Know **why a session got expensive + how to fix it** | `ctx explain <id>` |
@@ -133,7 +134,7 @@ signals to judge strategy, progress, loops, and outcome quality.
 so you can confirm. To target another, pass a **session id or prefix** — get the
 ids from `ctx sessions` (or the `ID` column in `ctx dashboard`) and run `ctx show <id>` to see a
 session's repo/cwd. No time window: `ctx explain`/`audit` cover the **whole
-session**; `ctx digest --since 2h` and `ctx steps --limit N` are the windowed ones.
+session**; `ctx top --since 30m`, `ctx digest --since 2h`, and `ctx steps --limit N` are the windowed ones.
 
 ## Use it
 
@@ -185,6 +186,11 @@ ctx explain  Make Claude workflow utility installable …  —  top avoidable co
 ctx steps
 ctx steps --limit 40
 ctx steps --json --limit 200    # machine-readable (feed to Claude to analyze)
+
+# Quick "what is costing me right now?" summary:
+ctx top
+ctx top --since 30m
+ctx top --json
 
 # Rollup summary: totals, top-cost turns, biggest cache writes, longest gaps:
 ctx digest --since 2h

@@ -795,6 +795,67 @@ def render_digest(limit: int, since: str | None, as_json: bool) -> str:
     return "\n".join(lines)
 
 
+def render_top(since: str | None, limit: int, as_json: bool) -> str:
+    """Fast "what is costing me now?" view over recent per-turn step records."""
+    since_seconds = parse_since(since)
+    views = collect_steps(max(1, limit), since_seconds)
+    digest = build_digest(views)
+    payload = {
+        "schema": "claude-context-top/1",
+        "window": since or f"last {len(views)} turns",
+        **digest,
+    }
+    if as_json:
+        return json.dumps(payload, indent=2, sort_keys=True)
+    if not views:
+        return "No step data in window — ctx top needs the heartbeat statusline's steps/<session>.jsonl files."
+
+    window = f"last {since}" if since else f"last {len(views)} turns"
+    lines = [
+        f"{TEAL}Cost top{RESET}  ({window})",
+        f"  ${digest['total_cost_usd']:.2f}  {compact_int(digest['total_tokens'])} tok  "
+        f"{digest['turns']} turns  {digest['sessions']} session(s)",
+        "",
+        f"{DIM}Sessions by spend:{RESET}",
+    ]
+    for a in digest["by_session"][:5]:
+        lines.append(
+            f"  ${a['cost_usd']:>7.2f}  {a['turns']:>4} turns  {compact_int(a['tokens']):>7} tok  "
+            f"{truncate(a['repo'] or '-', 18):<18}  {truncate(a['label'] or '-', 44)}"
+        )
+
+    lines.append(f"\n{DIM}Top-cost turns:{RESET}")
+    for v in digest["top_cost_turns"][:5]:
+        c = v["cost_usd"]
+        col = RED if c >= 1.0 else YELLOW if c >= 0.25 else ""
+        lines.append(
+            f"  {col}${c:>7.4f}{RESET if col else ''}  step {v['step']:>5}  "
+            f"ctx {v['context_pct']:>3.0f}%  gap {age(v['gap_s']):>5}  {truncate(v['label'] or v['repo'] or '-', 48)}"
+        )
+
+    cache_writes = digest["biggest_cache_writes"][:5]
+    if cache_writes:
+        lines.append(f"\n{DIM}Biggest cache writes:{RESET}")
+        for v in cache_writes:
+            marker = " rebuild" if is_rebuild(v) else ""
+            lines.append(
+                f"  {compact_int(v['cache_write']):>8} write  read {compact_int(v['cache_read']):>7}  "
+                f"step {v['step']:>5}{marker}  {truncate(v['label'] or v['repo'] or '-', 42)}"
+            )
+
+    lines.append(f"\n{DIM}Longest idle gaps:{RESET}")
+    for v in digest["longest_gaps"][:5]:
+        lines.append(
+            f"  {age(v['gap_s']):>6}  step {v['step']:>5}  ${v['cost_usd']:.4f}  "
+            f"{truncate(v['label'] or v['repo'] or '-', 48)}"
+        )
+
+    lines.append(f"\n{DIM}Advice:{RESET}")
+    for r in digest["recommendations"][:3]:
+        lines.append(f"  • {r}")
+    return "\n".join(lines)
+
+
 def tui(limit: int) -> int:
     """Scrollable/filterable curses browser for the per-turn step feed."""
     if not sys.stdout.isatty():
@@ -1418,6 +1479,10 @@ def main(argv: list[str] | None = None) -> int:
     steps_parser = subparsers.add_parser("steps", help="recent per-turn cost feed across all sessions")
     steps_parser.add_argument("--limit", type=int, default=20, help="number of recent turns to show")
     steps_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON (great for `!ctx steps --json` inside Claude)")
+    top_parser = subparsers.add_parser("top", help="show biggest recent spend, cache writes, and idle gaps")
+    top_parser.add_argument("--limit", type=int, default=200, help="max recent turns per session to scan")
+    top_parser.add_argument("--since", help="only turns newer than e.g. 30m, 2h, 1d")
+    top_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     digest_parser = subparsers.add_parser("digest", help="rollup summary of recent turns (cost, cache writes, gaps)")
     digest_parser.add_argument("--limit", type=int, default=1000, help="max recent turns per session to scan")
     digest_parser.add_argument("--since", help="only turns newer than e.g. 30m, 2h, 1d")
@@ -1455,6 +1520,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps([step_view(s, now) for s in recent_steps(max(1, args.limit))], indent=2))
         else:
             print(render_steps(max(1, args.limit)))
+        return 0
+    if args.command == "top":
+        print(render_top(args.since, max(1, args.limit), args.json))
         return 0
     if args.command == "digest":
         print(render_digest(max(1, args.limit), args.since, args.json))

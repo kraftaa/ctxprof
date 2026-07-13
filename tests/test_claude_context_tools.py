@@ -514,6 +514,21 @@ class EndToEndCliTests(unittest.TestCase):
         rows = json.loads(proc.stdout)
         self.assertTrue(rows and "cache_write" in rows[0] and "step" in rows[0])
 
+    def test_top_cli(self):
+        proc = self._run(["top", "--limit", "5"],
+                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        self.assertIn("Cost top", proc.stdout)
+        self.assertIn("Sessions by spend", proc.stdout)
+        self.assertIn("Top-cost turns", proc.stdout)
+
+    def test_top_json_cli(self):
+        proc = self._run(["top", "--json", "--limit", "5"],
+                         env={"CLAUDE_STATUS_STATE_DIR": str(STATE_DIR)})
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["schema"], "claude-context-top/1")
+        self.assertEqual(payload["sessions"], 1)
+        self.assertTrue(payload["top_cost_turns"])
+
     def test_hook_is_failsafe(self):
         # Garbage stdin and unknown sessions must never crash or emit noise.
         env = dict(os.environ, PYTHONPATH=str(PKG_ROOT), CLAUDE_STATUS_STATE_DIR=str(STATE_DIR))
